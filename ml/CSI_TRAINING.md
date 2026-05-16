@@ -40,11 +40,28 @@ python main.py --model cnn
 python -m ml.csi.collect --per-zone 300 --left COM10 --right COM8
 ```
 
-## Cluster (glas)
+## Cluster (glas / Triton) — **must use GPU**
+
+Login node `glass` has **no GPU**. Training there always uses CPU.
 
 ```bash
+# Check GPU partitions on your cluster
+sinfo -o "%P %G %a"
+
 mkdir -p logs
 sbatch ml/cluster/train_cnn.slurm
+tail -f logs/csi_cnn_*.out
+```
+
+Interactive GPU shell (if sbatch partition name differs, fix `--partition`):
+
+```bash
+srun --partition=gpu --gres=gpu:1 --cpus-per-task=8 --mem=32G --time=0:45:00 --pty bash
+module load cuda    # if needed: module avail cuda
+nvidia-smi
+cd ~/Defense_2026 && source .venv-train/bin/activate
+pip install "tensorflow[and-cuda]>=2.15,<2.20" tqdm
+python -u -m ml.csi.train --data data/csi_windows.npz --size large --require-gpu
 ```
 
 ## Rebuild NPZ from raw CSV

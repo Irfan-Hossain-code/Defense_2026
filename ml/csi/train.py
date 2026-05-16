@@ -5,7 +5,7 @@ Train 1D-CNN zone classifier on CSI windows (cluster-friendly).
 Usage:
   PYTHONUNBUFFERED=1 python -u -m ml.csi.train --data data/csi_windows.npz
   python -m ml.csi.train --size small --epochs 15          # fast smoke test
-  python -m ml.csi.train --size large --epochs 80            # ~10 min on cluster CPU
+  python -m ml.csi.train --size large --require-gpu            # GPU cluster (~15 min)
 """
 
 from __future__ import annotations
@@ -35,6 +35,11 @@ def main() -> None:
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--re-normalize", action="store_true")
     parser.add_argument("--no-tqdm", action="store_true")
+    parser.add_argument(
+        "--require-gpu",
+        action="store_true",
+        help="Exit if TensorFlow sees no GPU (use on SLURM GPU nodes only)",
+    )
     args = parser.parse_args()
 
     if args.size == "large":
@@ -59,7 +64,25 @@ def main() -> None:
     import tensorflow as tf
     from tensorflow import keras
 
-    _log(f"TensorFlow {tf.__version__} ready.\n")
+    gpus = tf.config.list_physical_devices("GPU")
+    if gpus:
+        for gpu in gpus:
+            try:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            except Exception:
+                pass
+        _log(f"TensorFlow {tf.__version__} — using GPU: {gpus}\n")
+    else:
+        _log(f"TensorFlow {tf.__version__} — NO GPU detected (CPU only).\n")
+        if args.require_gpu:
+            raise SystemExit(
+                "No GPU available for TensorFlow.\n"
+                "You are probably on the login node. Submit a GPU job:\n"
+                "  sbatch ml/cluster/train_cnn.slurm\n"
+                "Or get an interactive GPU shell:\n"
+                "  srun --partition=gpu --gres=gpu:1 --cpus-per-task=8 --mem=32G --time=0:45:00 --pty bash\n"
+                "Then: module load cuda && nvidia-smi"
+            )
 
     from .constants import ID_TO_LABEL, WINDOW_SIZE, ZONE_LABELS
     from .features import augment_window
@@ -163,9 +186,9 @@ def main() -> None:
             pass
 
     steps = max(1, len(x_train) // batch_size)
+    device_note = "GPU" if gpus else "CPU"
     _log(
-        f"\nTraining up to {epochs} epochs (~{steps} steps/epoch). "
-        f"Target runtime for large model: ~8–15 min on cluster CPU.\n"
+        f"\nTraining up to {epochs} epochs (~{steps} steps/epoch) on {device_note}.\n"
     )
 
     t0 = time.time()
@@ -207,6 +230,7 @@ def main() -> None:
         "val_accuracy": float(val_acc),
         "train_seconds": elapsed,
         "epochs_ran": epochs,
+        "device": "gpu" if gpus else "cpu",
         "qat": args.qat,
         "norm_mean": mean,
         "norm_std": std,
