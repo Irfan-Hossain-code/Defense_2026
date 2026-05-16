@@ -110,7 +110,7 @@ is in. The MIDDLE node can be on a second laptop (Mac) over the shared hotspot.
 
 | Node | Board | Connected to | Port |
 |------|-------|-------------|------|
-| LEFT | ESP32-WROOM | Windows laptop USB | COM9 |
+| LEFT | ESP32-WROOM | Windows laptop USB | COM10 |
 | RIGHT | ESP32-WROOM | Windows laptop USB | COM8 |
 | MIDDLE | ESP32-WROOM | Mac USB | `/dev/cu.usbserial-1130` |
 
@@ -123,7 +123,7 @@ Physical layout (same side of wall as the ESPs):
 [wall — person moves on the other side]
 
 [LEFT esp]        [MIDDLE esp]        [RIGHT esp]
-  COM9           Mac serial             COM8
+  COM10           Mac serial             COM8
    |___________________|___________________|
                 Wi-Fi hotspot (phone)
 ```
@@ -137,7 +137,7 @@ Physical layout (same side of wall as the ESPs):
 .venv\Scripts\Activate.ps1
 ```
 
-**Step 2 — flash LEFT board (COM9)**
+**Step 2 — flash LEFT board (COM10)**
 ```powershell
 python combining_three_esps\run_wroom.py left
 ```

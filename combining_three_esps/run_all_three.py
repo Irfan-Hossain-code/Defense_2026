@@ -1,7 +1,7 @@
 """
 run_all_three.py — live 3-node CSI localization.
 
-Reads serial CSI data from LEFT (COM9), RIGHT (COM8), and optionally
+Reads serial CSI data from LEFT (COM10), RIGHT (COM8), and optionally
 MIDDLE.  MIDDLE can come from either:
   - A local COM port (COM7) if the board is USB-connected to this PC
   - A TCP socket from the Mac running bridge_middle.py over the hotspot
@@ -40,7 +40,7 @@ This dict is designed to be consumed later by tracker.update_rf_estimate().
     |  distance ~0.5–2 m
     |
     [LEFT esp]   [MIDDLE esp]   [RIGHT esp]
-         COM9         COM7           COM8
+         COM10         COM7           COM8
          |             |              |
          └─────────────┴──────────────┘ ← USB to laptop
                     Wi-Fi hotspot ↑
@@ -71,7 +71,7 @@ import serial.tools.list_ports
 # ── Node configuration ────────────────────────────────────────────────────────
 # Change ports here if your boards are on different COM ports.
 NODES: dict[str, dict] = {
-    "left":   {"port": "COM9", "required": True},
+    "left":   {"port": "COM10", "required": True},
     "middle": {"port": "COM7", "required": False},  # optional — battery-powered
     "right":  {"port": "COM8", "required": True},
 }
@@ -514,7 +514,7 @@ def main() -> None:
     print("╔══════════════════════════════════════════════════════════════╗")
     print("║           3-Node ESP32 CSI Zone Localizer                   ║")
     print("╠══════════════════════════════════════════════════════════════╣")
-    print(f"║  LEFT   : COM9  (ESP32-WROOM, USB)                          ║")
+    print(f"║  LEFT   : COM10  (ESP32-WROOM, USB)                          ║")
     print(f"║  MIDDLE : {middle_src:<51}║")
     print(f"║  RIGHT  : COM8  (ESP32-WROOM, USB)                          ║")
     print(f"║  Sensitivity: {args.sensitivity:<3}  CSV: {os.path.basename(csv_path):<29}║")

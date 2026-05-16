@@ -120,12 +120,15 @@ class PersonTracker:
         if self.mode == "GHOST":
             self.ghost_alpha -= GHOST_FADE_RATE
 
-            # Drift the ghost using last known velocity + RF nudge
             elapsed = time.time() - self.ghost_start_t
+
+            # Drift the ghost using last known camera velocity for a short window.
+            # RF positioning is handled in main.py by directly moving the draw
+            # position to the zone target — not via accumulated offset.
             if elapsed < GHOST_DRIFT_SECONDS and self.last_state is not None:
-                mv_dx = self.last_state.movement_vec[0] + self._rf_dx
-                mv_dy = self.last_state.movement_vec[1] + self._rf_dy
-                self.ghost_offset += np.array([mv_dx, mv_dy]) * 0.25  # dampened
+                mv_dx = self.last_state.movement_vec[0]
+                mv_dy = self.last_state.movement_vec[1]
+                self.ghost_offset += np.array([mv_dx, mv_dy]) * 0.25
 
     def _build_state(self, landmarks: list, w: int, h: int) -> PersonState:
         lms = [(lm.x, lm.y, lm.z, lm.visibility) for lm in landmarks]

@@ -1,6 +1,6 @@
 /*
  * CSI Node Firmware — ESP32-WROOM
- * Used for LEFT (COM9) and RIGHT (COM8) nodes.
+ * Used for LEFT (COM10) and RIGHT (COM8) nodes.
  *
  * NODE_ID, WIFI_SSID, WIFI_PASS, and PROBE_INTERVAL_MS are all
  * injected by platformio.ini build_flags so this one file works
