@@ -27,12 +27,14 @@ class CnnZoneClassifier:
 
         self.model = tf.keras.models.load_model(keras_path)
         self.mean, self.std = self._load_norm_stats()
+        self.model_size = "unknown"
         meta_path = os.path.join(model_dir, "meta.json")
         self.labels = list(ZONE_LABELS)
         if os.path.isfile(meta_path):
             with open(meta_path, encoding="utf-8") as f:
                 meta = json.load(f)
             self.labels = meta.get("labels", self.labels)
+            self.model_size = meta.get("model_size", self.model_size)
 
     def _load_norm_stats(self) -> tuple[float, float]:
         stats_path = os.path.join(self.model_dir, "norm_stats.npz")

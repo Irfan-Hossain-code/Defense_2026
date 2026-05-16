@@ -24,7 +24,8 @@ pip install -r ml/requirements-train.txt
 python -m ml.csi.analyze --npz data/csi_windows.npz
 
 # Train (~5–15 min GPU, longer on CPU)
-python -m ml.csi.train --data data/csi_windows.npz --epochs 35
+python -u -m ml.csi.train --data data/csi_windows.npz --size large   # ~10 min CPU
+python -m ml.csi.train --data data/csi_windows.npz --size small --epochs 15   # fast test
 
 # INT8 TFLite for ESP32
 python -m ml.csi.export_tflite --model-dir models/csi_cnn

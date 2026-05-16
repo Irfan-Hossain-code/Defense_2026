@@ -26,11 +26,12 @@ echo "=== Dataset analysis ==="
 python -m ml.csi.analyze --npz data/csi_windows.npz --csv rf_training_data.csv
 
 echo "=== Training 1D-CNN + QAT ==="
-python -m ml.csi.train \
+python -u -m ml.csi.train \
   --data data/csi_windows.npz \
   --out-dir models/csi_cnn \
-  --epochs 40 \
-  --batch-size 64
+  --size large \
+  --epochs 80 \
+  --batch-size 32
 
 echo "=== TFLite export ==="
 python -m ml.csi.export_tflite --model-dir models/csi_cnn
