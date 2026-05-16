@@ -18,6 +18,17 @@ pip install opencv-python mediapipe numpy
 python main.py
 ```
 
+### Tactical AI + React HUD (Jarvis layer)
+
+See **[TACTICAL_SETUP.md](TACTICAL_SETUP.md)** for WebSocket HUD, ElevenLabs voice, PTT, and `.env` keys.
+
+```
+pip install -r requirements.txt
+cp .env.example .env
+python main.py          # terminal 1
+cd hud && npm run dev   # terminal 2 → http://localhost:5173
+```
+
 First run downloads `pose_landmarker_lite.task` (~5 MB) automatically.
 Press **ESC** in the camera window to quit.
 
