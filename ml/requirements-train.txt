@@ -1,0 +1,4 @@
+tensorflow>=2.12,<2.16
+tensorflow-model-optimization>=0.7
+numpy>=1.24
+scikit-learn>=1.3
