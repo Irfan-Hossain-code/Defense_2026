@@ -305,7 +305,7 @@ def main() -> None:
 
     port = args.port or find_port()
     if not port:
-        print("No ESP32 port found.  Use --port COM9")
+        print("No ESP32 port found.  Use --port COM10")
         sys.exit(1)
 
     run(port, args.baud, args.out, args.sensitivity, args.window)

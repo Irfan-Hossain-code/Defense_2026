@@ -2,7 +2,7 @@
 run_wroom.py — build and flash LEFT or RIGHT WROOM nodes.
 
 Usage:
-    python combining_three_esps/run_wroom.py left    # flash LEFT  (COM9)
+    python combining_three_esps/run_wroom.py left    # flash LEFT  (COM10)
     python combining_three_esps/run_wroom.py right   # flash RIGHT (COM8)
     python combining_three_esps/run_wroom.py left  --build    # build only
     python combining_three_esps/run_wroom.py right --monitor  # flash + monitor
@@ -39,13 +39,13 @@ def run(cmd: list[str], cwd: str) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Flash LEFT or RIGHT WROOM node.")
     parser.add_argument("node", choices=["left", "right"],
-                        help="Which node to flash: left (COM9) or right (COM8)")
+                        help="Which node to flash: left (COM10) or right (COM8)")
     parser.add_argument("--build",   action="store_true")
     parser.add_argument("--monitor", action="store_true")
     args = parser.parse_args()
 
     env  = args.node.upper()   # LEFT or RIGHT
-    port = "COM9" if args.node == "left" else "COM8"
+    port = "COM10" if args.node == "left" else "COM8"
     pio  = find_pio()
 
     print(f"PlatformIO : {pio}")

@@ -19,114 +19,62 @@ from identity import FaceIdentifier
 from rf import CsiReader
 
 
-# Zone → normalised screen-X centre (matches rf/csi_reader.py _ZONE_TARGET_X)
-_ZONE_X = {
-    "LEFT": 0.15, "LEFT_MIDDLE": 0.32, "MIDDLE": 0.50,
-    "RIGHT_MIDDLE": 0.68, "RIGHT": 0.85,
+# LEFT = left third, MIDDLE = centre third, RIGHT = right third of the frame.
+# Opacity of the highlight scales with ML confidence.
+_ZONE_COLS = {
+    "LEFT":   (0,  80, 255),   # orange-ish
+    "MIDDLE": (0, 200, 255),   # yellow
+    "RIGHT":  (255, 80,  0),   # blue
 }
 
 
-def _draw_ghost_rect(frame, state, offset, alpha: float) -> None:
+def _draw_zone_highlight(frame, zone: str, conf: float, inferred: bool) -> None:
     """
-    Ghost mode: draw a semi-transparent filled portrait rectangle instead of
-    a skeleton.  The rect uses the last known bbox, shifted by ghost drift,
-    and is forced into portrait orientation (height >= 1.8 × width).
+    Tint the relevant screen third when RF detects presence.
+    Opacity = confidence × 0.35 so a weak signal is subtle, a strong one is clear.
+    A thin border line separates the thirds.
     """
-    import numpy as np
-    x1, y1, x2, y2 = state.bbox
-    ox, oy = int(offset[0]), int(offset[1])
+    if zone not in _ZONE_COLS or conf <= 0.05:
+        return
+
     h, w = frame.shape[:2]
+    third = w // 3
+    x1 = {"LEFT": 0, "MIDDLE": third, "RIGHT": third * 2}[zone]
+    x2 = x1 + third
 
-    rx1 = int(np.clip(x1 + ox, 0, w - 1))
-    ry1 = int(np.clip(y1 + oy, 0, h - 1))
-    rx2 = int(np.clip(x2 + ox, 0, w - 1))
-    ry2 = int(np.clip(y2 + oy, 0, h - 1))
-
-    rw = max(rx2 - rx1, 1)
-    rh = ry2 - ry1
-    # Force portrait: at least 1.8 × width tall
-    if rh < rw * 1.8:
-        extra = int((rw * 1.8 - rh) / 2)
-        ry1 = max(0, ry1 - extra)
-        ry2 = min(h - 1, ry2 + extra)
-
-    fill_alpha = max(0.08, alpha * 0.30)
-    outline_color = (0, 130, 255)
+    color   = _ZONE_COLS[zone]
+    alpha   = min(conf * 0.40, 0.40)   # cap so it never blacks out the view
 
     overlay = frame.copy()
-    cv2.rectangle(overlay, (rx1, ry1), (rx2, ry2), outline_color, -1)
-    cv2.addWeighted(overlay, fill_alpha, frame, 1.0 - fill_alpha, 0, frame)
-    cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), outline_color, 2, cv2.LINE_AA)
-    cv2.putText(frame, "GHOST", (rx1 + 4, ry1 + 18),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, outline_color, 1, cv2.LINE_AA)
+    cv2.rectangle(overlay, (x1, 0), (x2, h), color, -1)
+    cv2.addWeighted(overlay, alpha, frame, 1.0 - alpha, 0, frame)
+
+    # Solid border on the active third
+    cv2.rectangle(frame, (x1, 0), (x2, h), color, 2)
+
+    # Label with confidence + inferred marker
+    tag = f"RF: {zone}  {conf:.0%}" + ("  ~" if inferred else "")
+    cv2.putText(frame, tag, (x1 + 8, 70),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
 
 
-def _draw_rf_presence_box(frame, zone: str, conf: float, inferred: bool) -> None:
-    """
-    Draw a dashed RF presence box at the estimated zone position.
-    Shown whenever RF detects motion and the camera cannot see the person.
-    Color: yellow when MIDDLE is measured, orange when inferred from L+R.
-    """
-    if zone in ("NO_MOTION", "UNKNOWN") or zone not in _ZONE_X:
+def _draw_rf_corner(frame, zone: str, conf: float, inferred: bool) -> None:
+    """Tiny corner label — always visible regardless of tracking mode."""
+    if zone == "NO_MOTION" or not zone:
         return
-
-    h, w = frame.shape[:2]
-    cx = int(_ZONE_X[zone] * w)
-    cy = int(0.42 * h)           # upper-body region
-    bw = int(0.12 * w)           # box half-width  (~150px on 1280px frame)
-    bh = int(0.38 * h)           # box half-height (~270px on 720px frame)
-
-    x1, y1 = cx - bw, cy - bh
-    x2, y2 = cx + bw, cy + bh
-
-    # Base colour: yellow (measured) or orange (inferred)
-    color = (0, 220, 255) if not inferred else (0, 160, 255)
-
-    # Draw a dashed rectangle by hand so it looks distinct from the camera bbox
-    dash, gap = 18, 10
-    pts = [(x1, y1, x2, y1), (x2, y1, x2, y2),
-           (x2, y2, x1, y2), (x1, y2, x1, y1)]
-    for lx1, ly1, lx2, ly2 in pts:
-        dx, dy = lx2 - lx1, ly2 - ly1
-        length = max(abs(dx), abs(dy))
-        if length == 0:
-            continue
-        steps = max(1, length // (dash + gap))
-        for s in range(steps):
-            t0 = s * (dash + gap) / length
-            t1 = min((s * (dash + gap) + dash) / length, 1.0)
-            p0 = (int(lx1 + dx * t0), int(ly1 + dy * t0))
-            p1 = (int(lx1 + dx * t1), int(ly1 + dy * t1))
-            cv2.line(frame, p0, p1, color, 2, cv2.LINE_AA)
-
-    # Confidence bar at the bottom of the box
-    bar_len = int(2 * bw * conf)
-    cv2.rectangle(frame, (x1, y2 + 4), (x1 + bar_len, y2 + 8), color, -1)
-
-    # Label
-    tag = f"RF:{zone}" + (" ~" if inferred else "")
-    cv2.putText(frame, tag, (x1, y1 - 8),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
-
-
-def _draw_rf_overlay(frame, zone: str, conf: float, inferred: bool) -> None:
-    """Small RF zone label in the bottom-left corner. Always shown."""
-    if zone == "NO_MOTION":
-        return
-    tag   = f"RF {zone}" + (" [L+R]" if inferred else "")
-    color = (0, 220, 255) if not inferred else (0, 160, 255)
+    tag   = f"RF {zone}" + (" [~]" if inferred else "")
+    color = _ZONE_COLS.get(zone, (200, 200, 200))
     cv2.putText(frame, tag, (12, frame.shape[0] - 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.50, color, 1, cv2.LINE_AA)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Defence 2026 Human Tracker")
     parser.add_argument("--cal", action="store_true",
-                        help="Run RF calibration (empty the sensing area first), "
+                        help="Run RF calibration (empty sensing area first), "
                              "save baseline, then exit.")
     parser.add_argument("--middle-host", default=None, metavar="IP",
-                        help="Mac's hotspot IP for MIDDLE node via bridge_middle.py "
-                             "(e.g. 10.75.241.42).  Omit if MIDDLE is on COM7 or absent.")
+                        help="Mac hotspot IP for MIDDLE node via bridge_middle.py.")
     args = parser.parse_args()
 
     # ── RF calibration mode ───────────────────────────────────────────────────
@@ -139,8 +87,8 @@ def main():
     print("=" * 56)
     print("  Defence Hackathon 2026 - Camera Tracking Subsystem")
     print("=" * 56)
-    print("  CAMERA TRACKING  -> live skeleton drawn on screen")
-    print("  RF FALLBACK      -> ghost figure + drift prediction")
+    print("  CAMERA TRACKING  -> live skeleton")
+    print("  RF FALLBACK      -> zone highlight (left/mid/right)")
     print("  Press ESC to quit.")
     print("-" * 56)
 
@@ -172,36 +120,26 @@ def main():
             frame_h, frame_w = frame.shape[:2]
             frame_rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            # RF nudge — applied before tracker.update() so ghost reacts this frame
-            rf_dx, rf_dy = rf.get_rf_nudge(frame_w, frame_h)
-            if rf_dx or rf_dy:
-                tracker.update_rf_estimate(rf_dx, rf_dy)
-
             state      = tracker.update(frame_rgb)
             face_state = face_identifier.update(frame_rgb)
 
+            zone = rf.latest_zone
+            conf = rf.latest_confidence
+
             if tracker.is_tracking and state:
+                # Camera sees the person — skeleton + bbox, no RF overlay
                 draw_skeleton(frame, state, color=(0, 255, 80))
                 draw_bbox(frame, state, color=(0, 255, 80))
 
-            elif tracker.ghost_state is not None:
-                g_alpha  = tracker.ghost_draw_alpha()
-                g_offset = tracker.ghost_draw_offset()
-                _draw_ghost_rect(frame, tracker.ghost_state, g_offset, g_alpha)
-                _draw_rf_presence_box(frame, rf.latest_zone, rf.latest_confidence,
-                                      rf.middle_inferred)
-
             else:
-                # Camera has no history at all — draw RF box if signal is present
-                _draw_rf_presence_box(frame, rf.latest_zone, rf.latest_confidence,
-                                      rf.middle_inferred)
+                # Camera lost the person — show RF zone tint as location hint
+                _draw_zone_highlight(frame, zone, conf, rf.middle_inferred)
 
             draw_hud(frame, tracker, state,
                      face_identified=(face_state is not None),
-                     rf_zone=rf.latest_zone, rf_conf=rf.latest_confidence)
+                     rf_zone=zone, rf_conf=conf)
             draw_identity_overlay(frame, face_state)
-            _draw_rf_overlay(frame, rf.latest_zone, rf.latest_confidence,
-                             rf.middle_inferred)
+            _draw_rf_corner(frame, zone, conf, rf.middle_inferred)
 
             cv2.imshow("Defence 2026 - Human Tracker", frame)
             if cv2.waitKey(1) & 0xFF == 27:  # ESC

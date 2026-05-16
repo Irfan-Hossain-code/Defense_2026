@@ -32,7 +32,7 @@ import serial
 import serial.tools.list_ports
 
 # ── Port / network config ─────────────────────────────────────────────────────
-LEFT_PORT   = "COM9"
+LEFT_PORT   = "COM10"
 RIGHT_PORT  = "COM8"
 MIDDLE_PORT = "COM7"   # tried first; skipped if not connected
 BRIDGE_PORT = 5555     # TCP port for Mac bridge
@@ -45,6 +45,24 @@ CAL_PACKETS = 60     # packets per node during calibration
 WINDOW_SIZE = 8      # rolling window for temporal variance
 SENSITIVITY = 2.5    # variance ratio above baseline = motion detected
 
+MODEL_FILE = os.path.join(os.path.dirname(__file__), "..", "rf_zone_model.pkl")
+MODEL_FILE = os.path.normpath(MODEL_FILE)
+NODES_REQUIRED = {"left": True, "middle": False, "right": True}
+
+
+def _load_model():
+    """Load trained RandomForest model if available, else return None."""
+    if not os.path.isfile(MODEL_FILE):
+        return None
+    try:
+        import joblib
+        model = joblib.load(MODEL_FILE)
+        print(f"[RF] ML model loaded from {os.path.basename(MODEL_FILE)}")
+        return model
+    except Exception as exc:
+        print(f"[RF] Could not load model ({exc}) — using threshold fallback.")
+        return None
+
 # How hard to push the ghost per frame (pixels).
 # Confidence-weighted, so a 0.5-confidence LEFT = 2px/frame push.
 RF_NUDGE_STRENGTH = 4.0
@@ -52,11 +70,9 @@ RF_NUDGE_STRENGTH = 4.0
 # Zone → normalised screen-X target (0 = left edge, 1 = right edge)
 # Ghost is nudged toward this target while in GHOST mode.
 _ZONE_TARGET_X: dict[str, float] = {
-    "LEFT":         0.15,
-    "LEFT_MIDDLE":  0.32,
-    "MIDDLE":       0.50,
-    "RIGHT_MIDDLE": 0.68,
-    "RIGHT":        0.85,
+    "LEFT":   0.15,
+    "MIDDLE": 0.50,
+    "RIGHT":  0.85,
 }
 
 
@@ -178,6 +194,7 @@ class CsiReader:
         self._zone       = "NO_MOTION"
         self._confidence = 0.0
         self._inferred   = False   # True when MIDDLE absent
+        self._model      = _load_model()   # None if not trained yet
 
     # ── Calibration ───────────────────────────────────────────────────────────
 
@@ -296,25 +313,10 @@ class CsiReader:
 
     def get_rf_nudge(self, frame_w: int, frame_h: int) -> tuple[float, float]:
         """
-        Returns (dx, dy) pixel nudge for tracker.update_rf_estimate().
-        dx is positive = push ghost right, negative = push left.
-        dy is always 0 (no vertical estimate from CSI).
+        No longer used for visual positioning (zone highlight handles that now).
+        Kept for API compatibility — always returns (0, 0).
         """
-        with self._lock:
-            zone  = self._zone
-            conf  = self._confidence
-            inf   = self._inferred
-            any_cal = any(n["calibrated"] for n in self._nodes.values())
-
-        if not any_cal or zone in ("NO_MOTION", "UNKNOWN"):
-            return 0.0, 0.0
-
-        target_norm = _ZONE_TARGET_X.get(zone, 0.5)
-        # Push toward target_norm from screen centre
-        dx = (target_norm - 0.5) * 2.0 * RF_NUDGE_STRENGTH * conf
-        if inf:
-            dx *= 0.65   # slightly softer when MIDDLE was inferred, not measured
-        return dx, 0.0
+        return 0.0, 0.0
 
     @property
     def latest_zone(self) -> str:
@@ -359,7 +361,27 @@ class CsiReader:
         right  = self._nodes["right"]["ratio"]
         mid_up = self._nodes["middle"]["connected"]
 
-        zone, conf, inferred = _infer_zone(left, middle, right, mid_up)
+        if self._model is not None:
+            # ML path: always ask the model.
+            # Use a low noise floor (1.1×) just to skip pure electrical noise —
+            # the model learned what each zone looks like and handles the rest.
+            max_r = max(left, middle, right)
+            if max_r < 1.1:
+                zone, conf, inferred = "NO_MOTION", 0.9, False
+            else:
+                try:
+                    import numpy as np
+                    proba = self._model.predict_proba([[left, middle, right]])[0]
+                    best  = int(proba.argmax())
+                    zone  = self._model.classes_[best]
+                    conf  = round(float(proba[best]), 2)
+                    inferred = not mid_up
+                except Exception:
+                    zone, conf, inferred = _infer_zone(left, middle, right, mid_up)
+        else:
+            # No model: hand-coded threshold (more conservative)
+            zone, conf, inferred = _infer_zone(left, middle, right, mid_up)
+
         self._zone       = zone
         self._confidence = conf
         self._inferred   = inferred
