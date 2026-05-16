@@ -75,11 +75,13 @@ def main():
                              "save baseline, then exit.")
     parser.add_argument("--middle-host", default=None, metavar="IP",
                         help="Mac hotspot IP for MIDDLE node via bridge_middle.py.")
+    parser.add_argument("--model", choices=["rf", "knn", "aalto"], default="rf",
+                        help="Zone classifier: rf (default), knn, or aalto.")
     args = parser.parse_args()
 
     # ── RF calibration mode ───────────────────────────────────────────────────
     if args.cal:
-        rf = CsiReader(middle_host=args.middle_host)
+        rf = CsiReader(middle_host=args.middle_host, model_name=args.model)
         rf.calibrate()
         sys.exit(0)
 
@@ -92,7 +94,7 @@ def main():
     print("  Press ESC to quit.")
     print("-" * 56)
 
-    rf = CsiReader(middle_host=args.middle_host)
+    rf = CsiReader(middle_host=args.middle_host, model_name=args.model)
     rf.load_calibration()
     rf.start()
 
