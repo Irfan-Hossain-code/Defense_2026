@@ -22,11 +22,13 @@ source .venv-train/bin/activate
 pip install --upgrade pip
 pip install -r ml/requirements-train.txt
 
+export PYTHONUNBUFFERED=1
+
 echo "=== Dataset analysis ==="
 python -m ml.csi.analyze --npz data/csi_windows.npz --csv rf_training_data.csv
 
 echo "=== Training 1D-CNN + QAT ==="
-python -m ml.csi.train \
+python -u -m ml.csi.train \
   --data data/csi_windows.npz \
   --out-dir models/csi_cnn \
   --epochs 40 \
