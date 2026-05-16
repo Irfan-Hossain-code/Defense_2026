@@ -47,15 +47,28 @@ SENSITIVITY = 2.5    # variance ratio above baseline = motion detected
 
 MODEL_FILE = os.path.join(os.path.dirname(__file__), "..", "rf_zone_model.pkl")
 MODEL_FILE = os.path.normpath(MODEL_FILE)
+CNN_MODEL_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "models", "csi_cnn")
+)
 NODES_REQUIRED = {"left": True, "middle": False, "right": True}
 
 
-def _load_model():
-    """Load trained RandomForest model if available, else return None."""
+def _load_model(model_name: str = "rf"):
+    """Load zone classifier: 'rf' (sklearn) or 'cnn' (Keras 1D-CNN)."""
+    if model_name == "cnn":
+        try:
+            from ml.csi.inference import CnnZoneClassifier
+
+            return CnnZoneClassifier.try_load(CNN_MODEL_DIR)
+        except Exception as exc:
+            print(f"[RF] CNN load failed ({exc}) — using threshold fallback.")
+            return None
+
     if not os.path.isfile(MODEL_FILE):
         return None
     try:
         import joblib
+
         model = joblib.load(MODEL_FILE)
         print(f"[RF] ML model loaded from {os.path.basename(MODEL_FILE)}")
         return model
@@ -180,8 +193,9 @@ class CsiReader:
         rf.stop()
     """
 
-    def __init__(self, middle_host: Optional[str] = None):
+    def __init__(self, middle_host: Optional[str] = None, model_name: str = "rf"):
         self._middle_host = middle_host
+        self._model_name  = model_name
         self._lock        = threading.Lock()
         self._running     = False
 
@@ -194,7 +208,13 @@ class CsiReader:
         self._zone       = "NO_MOTION"
         self._confidence = 0.0
         self._inferred   = False   # True when MIDDLE absent
-        self._model      = _load_model()   # None if not trained yet
+        self._model      = _load_model(model_name)
+
+        self._cnn_builder = None
+        if model_name == "cnn" and self._model is not None:
+            from ml.csi.windows import WindowBuilder
+
+            self._cnn_builder = WindowBuilder()
 
     # ── Calibration ───────────────────────────────────────────────────────────
 
@@ -361,20 +381,33 @@ class CsiReader:
         right  = self._nodes["right"]["ratio"]
         mid_up = self._nodes["middle"]["connected"]
 
-        if self._model is not None:
-            # ML path: always ask the model.
-            # Use a low noise floor (1.1×) just to skip pure electrical noise —
-            # the model learned what each zone looks like and handles the rest.
+        if self._model_name == "cnn" and self._cnn_builder is not None:
+            node_idx = {"left": 0, "right": 1}.get(name)
+            if node_idx is not None:
+                self._cnn_builder.push(node_idx, amps[: ns["n_sc"]])
+                if self._cnn_builder.ready():
+                    try:
+                        window = self._cnn_builder.get_window()
+                        zone, conf = self._model.predict(window)
+                        inferred = not mid_up
+                        if zone == "NO_MOTION":
+                            zone, conf, inferred = _infer_zone(left, middle, right, mid_up)
+                    except Exception:
+                        zone, conf, inferred = _infer_zone(left, middle, right, mid_up)
+                else:
+                    return
+            else:
+                return
+        elif self._model is not None:
             max_r = max(left, middle, right)
             if max_r < 1.1:
                 zone, conf, inferred = "NO_MOTION", 0.9, False
             else:
                 try:
-                    import numpy as np
                     proba = self._model.predict_proba([[left, middle, right]])[0]
-                    best  = int(proba.argmax())
-                    zone  = self._model.classes_[best]
-                    conf  = round(float(proba[best]), 2)
+                    best = int(proba.argmax())
+                    zone = self._model.classes_[best]
+                    conf = round(float(proba[best]), 2)
                     inferred = not mid_up
                 except Exception:
                     zone, conf, inferred = _infer_zone(left, middle, right, mid_up)
