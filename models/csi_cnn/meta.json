@@ -1,0 +1,18 @@
+{
+  "labels": [
+    "LEFT",
+    "MIDDLE",
+    "RIGHT"
+  ],
+  "window": 20,
+  "input_shape": [
+    20,
+    64,
+    2
+  ],
+  "val_accuracy": 1.0,
+  "train_seconds": 4.574314117431641,
+  "qat": false,
+  "norm_mean": 17.169166564941406,
+  "norm_std": 17.795957565307617
+}
