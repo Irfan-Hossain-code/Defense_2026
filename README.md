@@ -7,6 +7,10 @@ ghost at the last known position, drifting with the last known movement vector.
 The RF slot is a clean placeholder ready to receive coarse position estimates
 from ESP32 nodes.
 
+An optional **facial recognition overlay** identifies known individuals and
+draws their name in gold on screen. It runs in a background thread and never
+affects tracking performance.
+
 ## Quick start
 
 ```
@@ -16,6 +20,25 @@ python main.py
 
 First run downloads `pose_landmarker_lite.task` (~5 MB) automatically.
 Press **ESC** in the camera window to quit.
+
+### Facial recognition (optional)
+
+```
+pip install face_recognition
+```
+
+Add photos of each person under `known_faces/<name>/`:
+
+```
+known_faces/
+  irfan/
+    photo1.jpg
+    photo2.jpg
+```
+
+The system loads these on startup and identifies faces automatically. If
+`face_recognition` is not installed or the folder is empty, the overlay is
+silently disabled and everything else works normally.
 
 ---
 
@@ -30,6 +53,10 @@ Press **ESC** in the camera window to quit.
 | `tracker/tracker.py` | `PersonTracker` — wraps MediaPipe, scores confidence, switches TRACKING / GHOST modes, accumulates ghost drift | RGB frame per call; optional RF dx/dy via `update_rf_estimate()` | `PersonState` or `None`; ghost alpha and offset readable as properties |
 | `display/skeleton.py` | `draw_skeleton()` and `draw_bbox()` — draw the stick figure and bounding box onto a frame | BGR frame + `PersonState`; optional color, alpha, pixel offset | Frame modified in-place |
 | `display/hud.py` | `draw_hud()` — renders the mode label, live metrics, and ESC hint as an overlay | BGR frame + `PersonTracker` + current `PersonState` | Frame modified in-place |
+| `display/identity_overlay.py` | `draw_identity_overlay()` — draws a gold face box and name label for a recognised person | BGR frame + `FaceState` (or `None`) | Frame modified in-place; no-op if `None` |
+| `identity/face_state.py` | `FaceState` dataclass — name, confidence, and face bounding box for one recognised face | — | Returned by `FaceIdentifier.update()` |
+| `identity/database.py` | `FaceDatabase` — loads face encodings from `known_faces/` at startup | `known_faces/<name>/*.jpg` | List of encodings + names used by `FaceIdentifier` |
+| `identity/face_identifier.py` | `FaceIdentifier` — runs HOG face detection and dlib recognition in a background thread | RGB frame per call | `FaceState` or `None`; never blocks the main loop |
 
 ---
 
@@ -48,3 +75,25 @@ location to wire it in.
 |------|---------|--------|
 | **CAMERA TRACKING** | Pose detected with sufficient confidence | Green skeleton + bounding box; live metrics in corner |
 | **RF FALLBACK / GHOST MODE** | 12+ consecutive frames with no confident pose | Orange fading skeleton at last known position, drifting with last velocity |
+
+---
+
+## Facial recognition performance
+
+Recognition runs in a **background thread** in parallel with the main tracking
+loop, so it never causes frame drops. The main loop always returns the cached
+result instantly.
+
+The only performance knob is `_RECOGNITION_INTERVAL` in
+`identity/face_identifier.py`. It controls how often a new recognition pass is
+launched:
+
+| Interval | Behaviour |
+|----------|-----------|
+| `0.5` | Twice per second — more responsive label updates |
+| `1.0` | Once per second — default, smooth with no perceptible dips |
+| `2.0` | Every two seconds — maximum CPU headroom |
+
+Increase the interval if the system feels sluggish; decrease it if you want the
+name label to react faster to face changes. The tracking system is unaffected
+either way.

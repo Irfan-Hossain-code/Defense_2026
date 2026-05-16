@@ -8,7 +8,8 @@ import cv2
 
 from model_setup import ensure_model, MODEL_PATH
 from tracker import PersonTracker
-from display import draw_skeleton, draw_bbox, draw_hud
+from display import draw_skeleton, draw_bbox, draw_hud, draw_identity_overlay
+from identity import FaceIdentifier
 
 
 def main():
@@ -30,7 +31,8 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-    tracker = PersonTracker(model_path=MODEL_PATH)
+    tracker         = PersonTracker(model_path=MODEL_PATH)
+    face_identifier = FaceIdentifier()
 
     # ── RF integration point ──────────────────────────────────────────────────
     # Uncomment and adapt when the ESP32 RF module is ready:
@@ -50,8 +52,9 @@ def main():
                 print("WARNING: Failed to read frame. Exiting.")
                 break
 
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            state     = tracker.update(frame_rgb)
+            frame_rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            state      = tracker.update(frame_rgb)
+            face_state = face_identifier.update(frame_rgb)
 
             if tracker.is_tracking and state:
                 draw_skeleton(frame, state, color=(0, 255, 80))
@@ -67,6 +70,7 @@ def main():
                           alpha=g_alpha * 0.5, offset=g_offset)
 
             draw_hud(frame, tracker, state)
+            draw_identity_overlay(frame, face_state)
 
             cv2.imshow("Defence 2026 - Human Tracker", frame)
             if cv2.waitKey(1) & 0xFF == 27:  # ESC
