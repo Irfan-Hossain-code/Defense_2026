@@ -1,45 +1,38 @@
 #!/bin/bash
-#SBATCH --job-name=csi_cnn
+#SBATCH --job-name=csi-cnn
 #SBATCH --output=logs/csi_cnn_%j.out
 #SBATCH --error=logs/csi_cnn_%j.err
-#SBATCH --time=01:00:00
-#SBATCH --gres=gpu:1
+#SBATCH --time=00:30:00
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --cpus-per-task=4
+# Edit for your school cluster (glas example):
+# #SBATCH --partition=gpu
+# #SBATCH --gres=gpu:1
 
-# ── Setup ─────────────────────────────────────────────────────────────────────
-set -e
-echo "=== CSI CNN Training Job $SLURM_JOB_ID ==="
-echo "Node: $(hostname)  GPU: $CUDA_VISIBLE_DEVICES"
+set -euo pipefail
+cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
-# Activate environment (adjust path to your cluster venv)
-source $HOME/venvs/tf/bin/activate
+mkdir -p logs models
 
-# Go to project root (scp/rsync your repo here before submitting)
-cd $HOME/defence_2026
+module load python/3.11 2>/dev/null || true
+# module load cuda/12.1 2>/dev/null || true
 
-# Install deps if needed (first run only)
-pip install -q -r ml/requirements-train.txt
+python3 -m venv .venv-train
+source .venv-train/bin/activate
+pip install --upgrade pip
+pip install -r ml/requirements-train.txt
 
-# ── Analyse data first ────────────────────────────────────────────────────────
-echo ""
-echo "--- Data analysis ---"
-python -m ml.csi.analyze --npz data/csi_windows.npz
+echo "=== Dataset analysis ==="
+python -m ml.csi.analyze --npz data/csi_windows.npz --csv rf_training_data.csv
 
-# ── Train ─────────────────────────────────────────────────────────────────────
-echo ""
-echo "--- Training ---"
+echo "=== Training 1D-CNN + QAT ==="
 python -m ml.csi.train \
-    --data   data/csi_windows.npz \
-    --out    models/csi_cnn \
-    --epochs 40 \
-    --batch  32 \
-    --qat
+  --data data/csi_windows.npz \
+  --out-dir models/csi_cnn \
+  --epochs 40 \
+  --batch-size 64
 
-# ── Export TFLite ─────────────────────────────────────────────────────────────
-echo ""
-echo "--- TFLite export ---"
+echo "=== TFLite export ==="
 python -m ml.csi.export_tflite --model-dir models/csi_cnn
 
-echo ""
-echo "=== Done. Outputs in models/csi_cnn/ ==="
+echo "Done. Models: models/csi_cnn/zone_model_float.tflite (and zone_model_int8.tflite if supported)"

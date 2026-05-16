@@ -1,121 +1,114 @@
-"""
-ml/csi/export_tflite.py — export trained Keras model to TFLite.
-
-Usage:
-    python -m ml.csi.export_tflite --model-dir models/csi_cnn
-    python -m ml.csi.export_tflite --model-dir models/irfanin_cnn --int8
-
-Outputs:
-    zone_model.tflite       float32 (works everywhere, larger)
-    zone_model_int8.tflite  INT8 quantised (smaller, faster on ESP32)
-    norm_stats.npz          mean + std for inference normalisation
-"""
+#!/usr/bin/env python3
+"""Export trained CSI CNN to TFLite (float + optional INT8)."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import sys
+import tempfile
 
-_root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _root not in sys.path:
-    sys.path.insert(0, _root)
+import numpy as np
+import tensorflow as tf
+
+
+def _representative_dataset(meta_shape, g_mean: float, g_std: float):
+    rng = np.random.default_rng(0)
+
+    def rep_gen():
+        for _ in range(120):
+            raw = rng.uniform(5, 40, (1,) + tuple(meta_shape)).astype(np.float32)
+            yield [((raw - g_mean) / g_std).astype(np.float32)]
+
+    return rep_gen
+
+
+def _convert_via_saved_model(
+    model: tf.keras.Model, setup: callable | None = None
+) -> bytes:
+    """Keras 3 + TF 2.19: from_keras_model often breaks; SavedModel path is reliable."""
+    with tempfile.TemporaryDirectory() as saved_dir:
+        model.export(saved_dir)
+        converter = tf.lite.TFLiteConverter.from_saved_model(saved_dir)
+        if setup:
+            setup(converter)
+        return converter.convert()
+
+
+def export_float(model: tf.keras.Model, out_path: str) -> None:
+    def _setup(c):
+        c.optimizations = [tf.lite.Optimize.DEFAULT]
+
+    tflite_model = _convert_via_saved_model(model, _setup)
+    with open(out_path, "wb") as f:
+        f.write(tflite_model)
+    print(f"Wrote {out_path} ({len(tflite_model)/1024:.1f} KB, dynamic-range quant)")
+
+
+def export_int8(model: tf.keras.Model, out_path: str, meta_shape, g_mean: float, g_std: float) -> bool:
+    """Full INT8 — may fail on some TF/Keras builds; caller can use float export."""
+    try:
+        with tempfile.TemporaryDirectory() as saved_dir:
+            model.export(saved_dir)
+            converter = tf.lite.TFLiteConverter.from_saved_model(saved_dir)
+            converter.optimizations = [tf.lite.Optimize.DEFAULT]
+            converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+            converter.inference_input_type = tf.int8
+            converter.inference_output_type = tf.int8
+            converter.representative_dataset = _representative_dataset(meta_shape, g_mean, g_std)
+            tflite_model = converter.convert()
+    except Exception as exc:
+        print(f"INT8 export failed ({exc}) — use float TFLite or export on cluster GPU node.")
+        return False
+    with open(out_path, "wb") as f:
+        f.write(tflite_model)
+    print(f"Wrote {out_path} ({len(tflite_model)/1024:.1f} KB, INT8)")
+    return True
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-dir", default="models/csi_cnn",
-                        help="Directory containing best.keras and meta.json")
-    parser.add_argument("--data",      default="data/csi_windows.npz",
-                        help="NPZ used for INT8 calibration dataset")
-    parser.add_argument("--int8",      action="store_true",
-                        help="Also export INT8 quantised model (needs --data)")
+    parser.add_argument("--model-dir", default="models/csi_cnn")
+    parser.add_argument("--out", default=None, help="INT8 path (default zone_model_int8.tflite)")
+    parser.add_argument("--float-out", default=None, help="Float path (default zone_model_float.tflite)")
     args = parser.parse_args()
 
-    try:
-        import tensorflow as tf
-        import numpy as np
-    except ImportError:
-        print("Run:  pip install tensorflow numpy")
-        sys.exit(1)
-
     keras_path = os.path.join(args.model_dir, "best.keras")
-    meta_path  = os.path.join(args.model_dir, "meta.json")
-
     if not os.path.isfile(keras_path):
-        print(f"Model not found: {keras_path}")
-        print("Train first:  python -m ml.csi.train  or  python -m ml.csi.irfanin_model")
-        sys.exit(1)
-
-    print(f"\n=== TFLite Export: {keras_path} ===\n")
+        keras_path = os.path.join(args.model_dir, "final.keras")
+    if not os.path.isfile(keras_path):
+        raise SystemExit(f"No model in {args.model_dir}")
 
     model = tf.keras.models.load_model(keras_path)
-    model.summary()
+    meta_shape = model.input_shape[1:]
 
-    # ── Float32 export ────────────────────────────────────────────────────────
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    # GRU/LSTM ops need SELECT_TF_OPS — the standard TFLITE_BUILTINS alone
-    # cannot represent dynamic tensor lists used inside recurrent layers.
-    converter.target_spec.supported_ops = [
-        tf.lite.OpsSet.TFLITE_BUILTINS,
-        tf.lite.OpsSet.SELECT_TF_OPS,
-    ]
-    converter._experimental_lower_tensor_list_ops = False
-    tflite_model = converter.convert()
+    stats_path = os.path.join(args.model_dir, "norm_stats.npz")
+    if os.path.isfile(stats_path):
+        st = np.load(stats_path)
+        g_mean, g_std = float(st["mean"]), float(st["std"])
+    else:
+        g_mean, g_std = 0.0, 1.0
 
-    f32_path = os.path.join(args.model_dir, "zone_model.tflite")
-    with open(f32_path, "wb") as f:
-        f.write(tflite_model)
-    print(f"\n  Float32 TFLite → {f32_path}  ({len(tflite_model)//1024} KB)")
+    float_out = args.float_out or os.path.join(args.model_dir, "zone_model_float.tflite")
+    int8_out = args.out or os.path.join(args.model_dir, "zone_model_int8.tflite")
 
-    # ── INT8 export (post-training quantisation) ──────────────────────────────
-    if args.int8:
-        if not os.path.isfile(args.data):
-            print(f"  ⚠  --data {args.data} not found — skipping INT8 export.")
-        else:
-            data    = np.load(args.data, allow_pickle=True)
-            X_raw   = data["X"]
-            N, T, S, nodes = X_raw.shape
-            X_flat  = X_raw.reshape(N, T, S * nodes).astype(np.float32)
-            cal_ds  = X_flat[:200]   # 200 representative samples for calibration
+    try:
+        export_float(model, float_out)
+        export_int8(model, int8_out, meta_shape, g_mean, g_std)
+    except Exception as exc:
+        print(f"\nTFLite export failed on this platform ({exc}).")
+        print("Keras model is still usable:  python main.py --model cnn")
+        print("Retry export on Linux cluster:  sbatch ml/cluster/train_cnn.slurm")
+        return
 
-            def representative_dataset():
-                for sample in cal_ds:
-                    yield [sample[np.newaxis, ...].astype(np.float32)]
-
-            conv = tf.lite.TFLiteConverter.from_keras_model(model)
-            conv.optimizations        = [tf.lite.Optimize.DEFAULT]
-            conv.representative_dataset = representative_dataset
-            conv.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-            conv.inference_input_type  = tf.int8
-            conv.inference_output_type = tf.int8
-            tflite_int8 = conv.convert()
-
-            int8_path = os.path.join(args.model_dir, "zone_model_int8.tflite")
-            with open(int8_path, "wb") as f:
-                f.write(tflite_int8)
-            print(f"  INT8   TFLite → {int8_path}  ({len(tflite_int8)//1024} KB)")
-
-    # ── Save norm stats separately (easy to load on any device) ──────────────
-    data_path = args.data if os.path.isfile(args.data) else None
-    if data_path:
-        data = np.load(data_path, allow_pickle=True)
-        norm_path = os.path.join(args.model_dir, "norm_stats.npz")
-        np.savez(norm_path, mean=data["mean"], std=data["std"])
-        print(f"  Norm stats     → {norm_path}  (mean={float(data['mean']):.4f}, std={float(data['std']):.4f})")
-
-    # ── Load and print meta ───────────────────────────────────────────────────
+    labels = ["LEFT", "MIDDLE", "RIGHT"]
+    meta_path = os.path.join(args.model_dir, "meta.json")
     if os.path.isfile(meta_path):
-        with open(meta_path) as f:
-            meta = json.load(f)
-        print(f"\n  Labels : {meta['label_names']}")
-        print(f"  Val acc: {meta.get('val_accuracy', 'n/a')}")
+        with open(meta_path, encoding="utf-8") as f:
+            labels = json.load(f).get("labels", labels)
 
-    print("\n  Inference usage (Python):")
-    print("    data = np.load('norm_stats.npz')")
-    print("    window = (raw_window - float(data['mean'])) / float(data['std'])")
-    print("    # window shape: (1, 20, 128) — reshape (20,64,2) → (20,128)")
+    print(f"Input shape: {meta_shape}  |  labels: {labels}")
+    print(f"Inference norm: (window - {g_mean:.4f}) / {g_std:.4f}")
 
 
 if __name__ == "__main__":

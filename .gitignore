@@ -13,16 +13,20 @@ venv/
 .vscode/
 .idea/
 
-# Secrets & session data
+# Secrets & session
 .env
 data/*
 !data/profiles/
 !data/profiles/*.json
+!data/csi_windows.npz
 
-# HUD / Node
+# ML
+models/
+.venv-train/
+ml/cluster/logs/
+
+# HUD
 hud/node_modules/
 hud/dist/
 _hud_design/
-
-# PTT temp
 *.wav

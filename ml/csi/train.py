@@ -1,24 +1,10 @@
+#!/usr/bin/env python3
 """
-ml/csi/train.py — 1D-CNN zone classifier.
-
-Architecture (T=20 timesteps, S=64 subcarriers, N=2 nodes):
-  Input (batch, 20, 64, 2)
-  Reshape → (batch, 20, 128)          concat L+R subcarriers per timestep
-  Conv1D 32 k=7 → BN → ReLU → MaxPool2
-  Conv1D 64 k=5 → BN → ReLU → MaxPool2
-  Conv1D 96 k=3 → BN → ReLU
-  GlobalAveragePooling1D
-  Dense 64 → Dropout 0.35
-  Dense 3  → Softmax
+Train 1D-CNN zone classifier on CSI windows (cluster-friendly).
 
 Usage:
-    python -m ml.csi.train --data data/csi_windows.npz
-    python -m ml.csi.train --data data/csi_windows.npz --qat --epochs 40
-    python -m ml.csi.train --data data/csi_windows.npz --epochs 60 --out models/csi_cnn
-
-Outputs (in --out directory):
-    best.keras      best checkpoint (val_accuracy)
-    meta.json       class names, input shape, epoch count
+  python -m ml.csi.train --data data/csi_windows.npz
+  python -m ml.csi.train --data data/csi_windows.npz --qat --epochs 40
 """
 
 from __future__ import annotations
@@ -26,176 +12,156 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
+import time
 
-_root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _root not in sys.path:
-    sys.path.insert(0, _root)
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
 
-
-def _check_tf():
-    try:
-        import tensorflow as tf
-        return tf
-    except ImportError:
-        print("TensorFlow not installed.")
-        print("Install:  pip install tensorflow")
-        print("  or on cluster:  pip install -r ml/requirements-train.txt")
-        sys.exit(1)
+from .constants import ID_TO_LABEL, WINDOW_SIZE, ZONE_LABELS
+from .features import augment_window
+from .model_cnn import apply_qat, build_cnn, compile_model
 
 
-def build_model(input_shape=(20, 128), n_classes=3):
-    """Build the 1D-CNN from the spec."""
-    tf = _check_tf()
-    from tensorflow import keras
-    from tensorflow.keras import layers
+def load_npz(path: str) -> tuple[np.ndarray, np.ndarray, float, float, bool]:
+    """
+    Returns X, y, mean, std, already_normalized.
+    NPZ from collect/csv_to_npz uses global scalar z-score — do not re-normalize.
+    """
+    data = np.load(path, allow_pickle=True)
+    x = data["X"].astype(np.float32)
+    y = data["y"].astype(np.int64)
+    if "mean" in data and "std" in data:
+        mean = float(data["mean"])
+        std = float(data["std"])
+        # Heuristic: global norm yields ~unit variance on X
+        already = abs(x.std() - 1.0) < 0.5 or (std > 0 and mean != 0)
+        return x, y, mean, std, already
+    return x, y, float(x.mean()), float(x.std()) + 1e-6, False
 
-    inp  = keras.Input(shape=input_shape, name="csi_input")
-    x    = inp
 
-    x = layers.Conv1D(32, 7, padding="same", name="conv1")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.ReLU()(x)
-    x = layers.MaxPooling1D(2)(x)
-
-    x = layers.Conv1D(64, 5, padding="same", name="conv2")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.ReLU()(x)
-    x = layers.MaxPooling1D(2)(x)
-
-    x = layers.Conv1D(96, 3, padding="same", name="conv3")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.ReLU()(x)
-
-    x = layers.GlobalAveragePooling1D()(x)
-    x = layers.Dense(64, activation="relu")(x)
-    x = layers.Dropout(0.35)(x)
-    out = layers.Dense(n_classes, activation="softmax", name="zone")(x)
-
-    return keras.Model(inp, out, name="csi_cnn")
+def train_val_split(x, y, val_frac: float = 0.15, seed: int = 42):
+    rng = np.random.default_rng(seed)
+    idx = np.arange(len(y))
+    rng.shuffle(idx)
+    n_val = max(1, int(len(y) * val_frac))
+    val_idx = idx[:n_val]
+    tr_idx = idx[n_val:]
+    return x[tr_idx], y[tr_idx], x[val_idx], y[val_idx]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train CSI 1D-CNN zone classifier.")
-    parser.add_argument("--data",   default="data/csi_windows.npz")
-    parser.add_argument("--out",    default="models/csi_cnn")
-    parser.add_argument("--epochs", type=int, default=40)
-    parser.add_argument("--batch",  type=int, default=32)
-    parser.add_argument("--qat",    action="store_true",
-                        help="Apply quantization-aware training (needs tfmot)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", default="data/csi_windows.npz")
+    parser.add_argument("--out-dir", default="models/csi_cnn")
+    parser.add_argument("--epochs", type=int, default=35)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--qat", action="store_true")
+    parser.add_argument("--no-augment", action="store_true")
+    parser.add_argument("--re-normalize", action="store_true", help="Force per-channel norm")
     args = parser.parse_args()
 
-    tf = _check_tf()
-    import numpy as np
-    from sklearn.model_selection import train_test_split
-
-    # ── Load data ─────────────────────────────────────────────────────────────
     if not os.path.isfile(args.data):
-        print(f"Data not found: {args.data}")
-        print("Run:  python collect_training_data.py  first.")
-        sys.exit(1)
+        raise SystemExit(
+            f"Dataset not found: {args.data}\n"
+            "Fetch: git show origin/new_model:data/csi_windows.npz > data/csi_windows.npz\n"
+            "Or collect: python -m ml.csi.collect"
+        )
 
-    data        = np.load(args.data, allow_pickle=True)
-    X_raw       = data["X"]            # (N, 20, 64, 2)  already normalised
-    y           = data["y"]
-    label_names = list(data["label_names"])
+    os.makedirs(args.out_dir, exist_ok=True)
 
-    # Reshape: (N, 20, 64, 2) → (N, 20, 128) — concat nodes along subcarrier axis
-    N, T, S, nodes = X_raw.shape
-    X = X_raw.reshape(N, T, S * nodes).astype(np.float32)
+    print("\n=== CSI 1D-CNN training ===\n")
+    x, y, mean, std, already_norm = load_npz(args.data)
+    print(f"Loaded {len(y)} samples, X shape {x.shape}")
+    if already_norm and not args.re_normalize:
+        print(f"Using existing global norm (mean={mean:.4f}, std={std:.4f})")
+    else:
+        print("Applying per-dataset z-score...")
+        std = float(x.std()) + 1e-6
+        mean = float(x.mean())
+        x = ((x - mean) / std).astype(np.float32)
 
-    print(f"\n=== CSI CNN Training ===\n")
-    print(f"  Data     : {args.data}")
-    print(f"  X shape  : {X.shape}  (after reshape)")
-    print(f"  Classes  : {label_names}")
-    for i, name in enumerate(label_names):
-        print(f"    {name:<10} {int((y == i).sum()):>5} windows")
+    if x.shape[1:] != (WINDOW_SIZE, 64, 2):
+        raise SystemExit(f"Expected shape (*, {WINDOW_SIZE}, 64, 2), got {x.shape}")
 
-    # ── Train / val split — stratified, no shuffle to avoid temporal leakage ──
-    X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.15, stratify=y, random_state=42)
+    x_train, y_train, x_val, y_val = train_val_split(x, y)
 
-    print(f"\n  Train : {len(X_train)}  Val : {len(X_val)}")
+    if not args.no_augment:
+        rng = np.random.default_rng(42)
+        aug_x, aug_y = [], []
+        for i in range(len(x_train)):
+            aug_x.append(augment_window(x_train[i], rng))
+            aug_y.append(y_train[i])
+        x_train = np.concatenate([x_train, np.stack(aug_x)], axis=0)
+        y_train = np.concatenate([y_train, np.array(aug_y)], axis=0)
+        perm = rng.permutation(len(y_train))
+        x_train, y_train = x_train[perm], y_train[perm]
+        print(f"Augmented train size: {len(y_train)}")
 
-    # ── Augmentation (train only) — light noise + scale ──────────────────────
-    def augment(x_batch, y_batch):
-        noise = tf.random.normal(tf.shape(x_batch), stddev=0.05)
-        scale = tf.random.uniform([tf.shape(x_batch)[0], 1, 1], 0.9, 1.1)
-        return x_batch * scale + noise, y_batch
-
-    train_ds = (tf.data.Dataset.from_tensor_slices((X_train, y_train))
-                .shuffle(len(X_train), seed=42)
-                .batch(args.batch)
-                .map(augment, num_parallel_calls=tf.data.AUTOTUNE)
-                .prefetch(tf.data.AUTOTUNE))
-
-    val_ds = (tf.data.Dataset.from_tensor_slices((X_val, y_val))
-              .batch(args.batch)
-              .prefetch(tf.data.AUTOTUNE))
-
-    # ── Build model ───────────────────────────────────────────────────────────
-    model = build_model(input_shape=(T, S * nodes), n_classes=len(label_names))
-
+    model = build_cnn()
     if args.qat:
-        try:
-            import tensorflow_model_optimization as tfmot
-            model = tfmot.quantization.keras.quantize_model(model)
-            print("  QAT enabled (INT8-friendly weights)")
-        except ImportError:
-            print("  ⚠  tfmot not installed — skipping QAT.")
-            print("     pip install tensorflow-model-optimization")
-
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(1e-3),
-        loss="sparse_categorical_crossentropy",
-        metrics=["accuracy"],
-    )
-    model.summary()
-
-    # ── Callbacks ─────────────────────────────────────────────────────────────
-    os.makedirs(args.out, exist_ok=True)
-    best_path = os.path.join(args.out, "best.keras")
+        print("Applying quantization-aware training (QAT)...")
+        model = apply_qat(model)
+    else:
+        compile_model(model)
 
     callbacks = [
-        tf.keras.callbacks.ModelCheckpoint(
-            best_path, monitor="val_accuracy",
-            save_best_only=True, verbose=1),
-        tf.keras.callbacks.EarlyStopping(
-            monitor="val_accuracy", patience=12,
-            restore_best_weights=True, verbose=1),
-        tf.keras.callbacks.ReduceLROnPlateau(
-            monitor="val_accuracy", factor=0.5,
-            patience=6, min_lr=1e-5, verbose=1),
+        keras.callbacks.EarlyStopping(
+            monitor="val_accuracy", patience=8, restore_best_weights=True
+        ),
+        keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=4),
+        keras.callbacks.ModelCheckpoint(
+            os.path.join(args.out_dir, "best.keras"),
+            monitor="val_accuracy",
+            save_best_only=True,
+        ),
     ]
 
-    # ── Train ─────────────────────────────────────────────────────────────────
-    history = model.fit(
-        train_ds, validation_data=val_ds,
-        epochs=args.epochs, callbacks=callbacks,
+    t0 = time.time()
+    model.fit(
+        x_train,
+        y_train,
+        validation_data=(x_val, y_val),
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        callbacks=callbacks,
+        verbose=1,
     )
+    elapsed = time.time() - t0
+    print(f"\nTraining time: {elapsed/60:.1f} min")
 
-    # ── Evaluate ──────────────────────────────────────────────────────────────
-    val_loss, val_acc = model.evaluate(val_ds, verbose=0)
-    print(f"\n  Val accuracy : {val_acc:.1%}")
-    print(f"  Val loss     : {val_loss:.4f}")
+    val_loss, val_acc = model.evaluate(x_val, y_val, verbose=0)
+    print(f"Val accuracy: {val_acc:.1%}")
 
-    # ── Save metadata ─────────────────────────────────────────────────────────
+    y_pred = np.argmax(model.predict(x_val, verbose=0), axis=1)
+    print("\nConfusion (rows=actual, cols=pred):")
+    for i in range(len(ZONE_LABELS)):
+        row = "".join(
+            f"{((y_val == i) & (y_pred == j)).sum():>8}" for j in range(len(ZONE_LABELS))
+        )
+        print(f"{ID_TO_LABEL[i]:12}{row}")
+
+    model.save(os.path.join(args.out_dir, "final.keras"))
+    np.savez(
+        os.path.join(args.out_dir, "norm_stats.npz"),
+        mean=np.float32(mean),
+        std=np.float32(std),
+    )
     meta = {
-        "label_names":  label_names,
-        "input_shape":  [T, S * nodes],
-        "n_classes":    len(label_names),
-        "val_accuracy": round(float(val_acc), 4),
-        "epochs_run":   len(history.history["loss"]),
-        "qat":          args.qat,
-        "data_file":    args.data,
+        "labels": list(ZONE_LABELS),
+        "window": WINDOW_SIZE,
+        "input_shape": list(x.shape[1:]),
+        "val_accuracy": float(val_acc),
+        "train_seconds": elapsed,
+        "qat": args.qat,
+        "norm_mean": mean,
+        "norm_std": std,
     }
-    meta_path = os.path.join(args.out, "meta.json")
-    with open(meta_path, "w") as f:
+    with open(os.path.join(args.out_dir, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"\n  Saved: {best_path}")
-    print(f"  Saved: {meta_path}")
-    print(f"\n  Next: python -m ml.csi.export_tflite --model-dir {args.out}")
+    print(f"\nSaved model → {args.out_dir}/")
+    print("Export TFLite: python -m ml.csi.export_tflite --model-dir", args.out_dir)
 
 
 if __name__ == "__main__":

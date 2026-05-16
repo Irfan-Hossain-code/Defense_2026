@@ -1,16 +1,18 @@
 {
-  "label_names": [
+  "labels": [
     "LEFT",
     "MIDDLE",
     "RIGHT"
   ],
+  "window": 20,
   "input_shape": [
     20,
-    128
+    64,
+    2
   ],
-  "n_classes": 3,
   "val_accuracy": 1.0,
-  "epochs_run": 14,
+  "train_seconds": 4.574314117431641,
   "qat": false,
-  "data_file": "data/csi_windows.npz"
+  "norm_mean": 17.169166564941406,
+  "norm_std": 17.795957565307617
 }
