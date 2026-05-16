@@ -39,9 +39,11 @@ def build_cnn(
         x = layers.Dense(64, activation="relu")(x)
         x = layers.Dropout(0.2)(x)
     else:
-        # Larger stack — targets ~8–15 min CPU training with default train.py settings
-        for filters, kernel in ((128, 9), (256, 7), (384, 5), (512, 5), (512, 3)):
+        # Larger stack — ~8–15 min CPU training. Window T=20 allows at most 3× pool (20→10→5→2).
+        for filters, kernel in ((128, 9), (256, 7), (384, 5)):
             x = _conv_block(x, filters, kernel, pool=True)
+        for filters, kernel in ((512, 5), (512, 3)):
+            x = _conv_block(x, filters, kernel, pool=False)
         x = layers.Conv1D(512, 3, padding="same", use_bias=False)(x)
         x = layers.BatchNormalization()(x)
         x = layers.ReLU()(x)
