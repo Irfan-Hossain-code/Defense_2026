@@ -8,7 +8,7 @@ import numpy as np
 from .database import FaceDatabase
 from .face_state import FaceState
 
-_RECOGNITION_INTERVAL = 1.0    # seconds between background recognition passes, keeping the default to 1s for now
+_RECOGNITION_INTERVAL = 1.0    # seconds between background recognition passes
 _CONFIDENCE_THRESHOLD = 0.55   # face_recognition distance; <= this -> confirmed match
 _CACHE_TTL            = 2.0    # seconds to keep last result visible
 
@@ -48,7 +48,6 @@ class FaceIdentifier:
     def available(self) -> bool:
         return self._available and not self._db.is_empty
 
-    # ------------------------------------------------------------------
     def update(self, frame_rgb) -> Optional[FaceState]:
         """
         Returns the most recent cached FaceState instantly (never blocks).
@@ -59,22 +58,19 @@ class FaceIdentifier:
 
         now = time.monotonic()
 
-        # Kick off a new background pass if interval elapsed and no pass running
         if (now - self._last_run) >= _RECOGNITION_INTERVAL:
             if self._thread is None or not self._thread.is_alive():
                 self._last_run = now
-                frame_copy = frame_rgb.copy()   # snapshot for the thread
+                frame_copy = frame_rgb.copy()
                 self._thread = threading.Thread(
                     target=self._recognize, args=(frame_copy,), daemon=True)
                 self._thread.start()
 
-        # Return cached result immediately — never block the main loop
         with self._lock:
             if self._cached is not None and (now - self._cache_time) < _CACHE_TTL:
                 return self._cached
         return None
 
-    # ------------------------------------------------------------------
     def _recognize(self, frame_rgb) -> None:
         """Background worker: detect + identify, then update the cache."""
         import face_recognition

@@ -12,3 +12,17 @@ venv/
 # IDE
 .vscode/
 .idea/
+
+# Secrets & session data
+.env
+data/*
+!data/profiles/
+!data/profiles/*.json
+
+# HUD / Node
+hud/node_modules/
+hud/dist/
+_hud_design/
+
+# PTT temp
+*.wav
