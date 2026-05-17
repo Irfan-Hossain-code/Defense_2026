@@ -1,0 +1,16 @@
+{
+  "label_names": [
+    "LEFT",
+    "MIDDLE",
+    "RIGHT"
+  ],
+  "input_shape": [
+    20,
+    128
+  ],
+  "n_classes": 3,
+  "val_accuracy": 1.0,
+  "epochs_run": 16,
+  "split": "temporal_15pct",
+  "data_file": "data/csi_windows.npz"
+}

@@ -45,22 +45,57 @@ CAL_PACKETS = 60     # packets per node during calibration
 WINDOW_SIZE = 8      # rolling window for temporal variance
 SENSITIVITY = 2.5    # variance ratio above baseline = motion detected
 
-MODEL_FILE = os.path.join(os.path.dirname(__file__), "..", "rf_zone_model.pkl")
-MODEL_FILE = os.path.normpath(MODEL_FILE)
+_base = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+
+MODEL_FILES = {
+    "rf":           os.path.join(_base, "rf_zone_model.pkl"),
+    "knn":          os.path.join(_base, "rf_zone_model_knn.pkl"),
+    "aalto":        os.path.join(_base, "rf_zone_model_aalto.pkl"),
+    "first_branch": os.path.join(_base, "rf_zone_model_first_branch.pkl"),
+    "cnn":          os.path.join(_base, "models", "csi_cnn",     "best.keras"),
+    "irfanin":      os.path.join(_base, "models", "irfanin_cnn", "best.keras"),
+}
+# Keras models need tf.keras.models.load_model instead of joblib
+KERAS_MODELS   = {"cnn", "irfanin"}
 NODES_REQUIRED = {"left": True, "middle": False, "right": True}
+INFERENCE_HZ   = 20
 
 
-def _load_model():
-    """Load trained RandomForest model if available, else return None."""
-    if not os.path.isfile(MODEL_FILE):
+def _load_keras_norm(model_name: str) -> tuple[float, float]:
+    """Load normalisation stats for Keras models."""
+    candidates = [
+        os.path.join(_base, "models", f"{model_name}_cnn", "norm_stats.npz"),
+        os.path.join(_base, "models", "csi_cnn", "norm_stats.npz"),
+        os.path.join(_base, "data", "csi_windows.npz"),
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            try:
+                import numpy as np
+                d = np.load(p, allow_pickle=True)
+                return float(d["mean"]), float(d["std"])
+            except Exception:
+                continue
+    return 0.0, 1.0
+
+
+def _load_model(model_name: str = "rf"):
+    """Load a trained zone classifier."""
+    path = MODEL_FILES.get(model_name, MODEL_FILES["rf"])
+    if not os.path.isfile(path):
         return None
     try:
-        import joblib
-        model = joblib.load(MODEL_FILE)
-        print(f"[RF] ML model loaded from {os.path.basename(MODEL_FILE)}")
+        if model_name in KERAS_MODELS:
+            import tensorflow as tf
+            model = tf.keras.models.load_model(path)
+            print(f"[RF] Keras model '{model_name}' loaded from {os.path.basename(path)}")
+        else:
+            import joblib
+            model = joblib.load(path)
+            print(f"[RF] {model_name.upper()} model loaded from {os.path.basename(path)}")
         return model
     except Exception as exc:
-        print(f"[RF] Could not load model ({exc}) — using threshold fallback.")
+        print(f"[RF] Could not load {model_name} model ({exc}) — using threshold fallback.")
         return None
 
 # How hard to push the ghost per frame (pixels).
@@ -77,6 +112,39 @@ _ZONE_TARGET_X: dict[str, float] = {
 
 
 # ── CSI parsing ───────────────────────────────────────────────────────────────
+def _build_features(left: float, middle: float, right: float) -> list[float]:
+    """3-feature vector for rf/knn models (trained on ratio data)."""
+    return [left, middle, right]
+
+
+def _build_aalto_features(left_window: list, right_window: list) -> list[float]:
+    """
+    Extract the same 22 features that aalto_model.py uses during training.
+    Imports the function directly from aalto_model so they always stay in sync.
+    """
+    try:
+        import sys, os
+        root = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from aalto_model import extract_features, N_SC
+        import numpy as np
+
+        def _mean_amps(window) -> list[float]:
+            if not window:
+                return [0.0] * N_SC
+            arr = np.array([v[:N_SC] for v in window if len(v) >= 4], dtype=float)
+            if arr.size == 0:
+                return [0.0] * N_SC
+            mean = arr.mean(axis=0)
+            padded = list(mean) + [0.0] * max(0, N_SC - len(mean))
+            return padded[:N_SC]
+
+        return extract_features(_mean_amps(left_window), _mean_amps(right_window))
+    except Exception:
+        return [0.0] * 22
+
+
 def _parse_csi(line: str) -> Optional[dict]:
     if not line.startswith("CSI:"):
         return None
@@ -180,7 +248,7 @@ class CsiReader:
         rf.stop()
     """
 
-    def __init__(self, middle_host: Optional[str] = None):
+    def __init__(self, middle_host: Optional[str] = None, model_name: str = "rf"):
         self._middle_host = middle_host
         self._lock        = threading.Lock()
         self._running     = False
@@ -191,10 +259,16 @@ class CsiReader:
             "right":  _fresh(),
         }
 
-        self._zone       = "NO_MOTION"
-        self._confidence = 0.0
-        self._inferred   = False   # True when MIDDLE absent
-        self._model      = _load_model()   # None if not trained yet
+        self._zone        = "NO_MOTION"
+        self._confidence  = 0.0
+        self._inferred    = False
+        self._model       = _load_model(model_name)
+        self._model_name  = model_name
+        if model_name in KERAS_MODELS:
+            self._keras_mean, self._keras_std = _load_keras_norm(model_name)
+            print(f"[RF] Norm: mean={self._keras_mean:.4f} std={self._keras_std:.4f}")
+        else:
+            self._keras_mean, self._keras_std = 0.0, 1.0
 
     # ── Calibration ───────────────────────────────────────────────────────────
 
@@ -288,23 +362,24 @@ class CsiReader:
     # ── Start / stop ──────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Start background reader threads."""
+        """Start serial reader threads + a dedicated inference thread."""
         self._running = True
-        for name, port in [("left", LEFT_PORT), ("right", RIGHT_PORT)]:
-            t = threading.Thread(target=self._serial_reader,
-                                 args=(name, port), daemon=True)
-            t.start()
 
-        # MIDDLE: try network bridge first, then local COM port
+        for name, port in [("left", LEFT_PORT), ("right", RIGHT_PORT)]:
+            threading.Thread(target=self._serial_reader,
+                             args=(name, port), daemon=True).start()
+
         if self._middle_host:
-            t = threading.Thread(target=self._network_reader,
-                                 args=("middle", self._middle_host, BRIDGE_PORT),
-                                 daemon=True)
-            t.start()
+            threading.Thread(target=self._network_reader,
+                             args=("middle", self._middle_host, BRIDGE_PORT),
+                             daemon=True).start()
         else:
-            t = threading.Thread(target=self._serial_reader,
-                                 args=("middle", MIDDLE_PORT), daemon=True)
-            t.start()
+            threading.Thread(target=self._serial_reader,
+                             args=("middle", MIDDLE_PORT), daemon=True).start()
+
+        # Inference thread: ML runs here, never inside the serial read lock
+        threading.Thread(target=self._inference_loop,
+                         name="rf_inference", daemon=True).start()
 
     def stop(self) -> None:
         self._running = False
@@ -341,50 +416,98 @@ class CsiReader:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _process_packet(self, name: str, pkt: dict) -> None:
-        """Called under _lock. Updates node state and recomputes zone."""
+        """Called under _lock. Updates node state ONLY — no ML inference here.
+        Zone inference runs in its own thread so serial reading is never blocked."""
         ns   = self._nodes[name]
         amps = pkt["amplitudes"]
         ns["rssi"] = pkt["rssi"]
         ns["pkts"] += 1
 
         if not ns["calibrated"]:
-            return  # not yet calibrated — ignore packets
+            return
 
         ns["window"].append(amps[:ns["n_sc"]])
         if len(ns["window"]) >= 2:
-            t_var = _temporal_variance(list(ns["window"]), ns["n_sc"])
+            t_var       = _temporal_variance(list(ns["window"]), ns["n_sc"])
             ns["ratio"] = t_var / ns["baseline_var"]
 
-        # Recompute zone from all current ratios
-        left   = self._nodes["left"]["ratio"]
-        middle = self._nodes["middle"]["ratio"]
-        right  = self._nodes["right"]["ratio"]
-        mid_up = self._nodes["middle"]["connected"]
+    def _inference_loop(self) -> None:
+        """
+        Dedicated background thread for zone inference.
+        Reads the latest ratios, runs the model, and writes back the result —
+        all without blocking the serial reader threads.
+        Runs at INFERENCE_HZ (20 Hz) which is plenty for display purposes.
+        """
+        import numpy as np
+        interval = 1.0 / INFERENCE_HZ
 
-        if self._model is not None:
-            # ML path: always ask the model.
-            # Use a low noise floor (1.1×) just to skip pure electrical noise —
-            # the model learned what each zone looks like and handles the rest.
-            max_r = max(left, middle, right)
-            if max_r < 1.1:
-                zone, conf, inferred = "NO_MOTION", 0.9, False
+        while self._running:
+            time.sleep(interval)
+
+            # Snapshot ratios under lock (fast — no ML here)
+            with self._lock:
+                left   = self._nodes["left"]["ratio"]
+                middle = self._nodes["middle"]["ratio"]
+                right  = self._nodes["right"]["ratio"]
+                mid_up = self._nodes["middle"]["connected"]
+
+            # Run inference OUTSIDE the lock
+            if self._model is not None:
+
+                if self._model_name in KERAS_MODELS:
+                    # ── Keras path (cnn / irfanin) ────────────────────────────
+                    with self._lock:
+                        lw     = list(self._nodes["left"]["window"])
+                        rw     = list(self._nodes["right"]["window"])
+                        mid_up = self._nodes["middle"]["connected"]
+                    try:
+                        import numpy as _np
+                        from ml.csi.windows import pad_amplitudes, T as _T, S as _S
+                        if len(lw) < _T or len(rw) < _T:
+                            zone, conf, inferred = "NO_MOTION", 0.9, False
+                        else:
+                            L = _np.array([pad_amplitudes(a, _S) for a in lw[-_T:]])
+                            R = _np.array([pad_amplitudes(a, _S) for a in rw[-_T:]])
+                            win = _np.stack([L, R], axis=-1)          # (T, S, 2)
+                            X   = win.reshape(1, _T, _S * 2).astype(_np.float32)
+                            X   = (X - self._keras_mean) / self._keras_std
+                            proba    = self._model.predict(X, verbose=0)[0]
+                            best     = int(proba.argmax())
+                            zone     = ["LEFT", "MIDDLE", "RIGHT"][best]
+                            conf     = round(float(proba[best]), 2)
+                            inferred = not mid_up
+                    except Exception:
+                        zone, conf, inferred = "NO_MOTION", 0.0, False
+
+                else:
+                    # ── sklearn path (rf / knn / aalto) ──────────────────────
+                    max_r = max(left, middle, right)
+                    if max_r < 1.1:
+                        zone, conf, inferred = "NO_MOTION", 0.9, False
+                    else:
+                        try:
+                            if self._model_name == "aalto":
+                                with self._lock:
+                                    lw = list(self._nodes["left"]["window"])
+                                    rw = list(self._nodes["right"]["window"])
+                                features = _build_aalto_features(lw, rw)
+                            else:
+                                features = _build_features(left, middle, right)
+                            proba    = self._model.predict_proba([features])[0]
+                            best     = int(proba.argmax())
+                            zone     = self._model.classes_[best]
+                            conf     = round(float(proba[best]), 2)
+                            inferred = not mid_up
+                        except Exception:
+                            zone, conf, inferred = _infer_zone(left, middle, right, mid_up)
             else:
-                try:
-                    import numpy as np
-                    proba = self._model.predict_proba([[left, middle, right]])[0]
-                    best  = int(proba.argmax())
-                    zone  = self._model.classes_[best]
-                    conf  = round(float(proba[best]), 2)
-                    inferred = not mid_up
-                except Exception:
-                    zone, conf, inferred = _infer_zone(left, middle, right, mid_up)
-        else:
-            # No model: hand-coded threshold (more conservative)
-            zone, conf, inferred = _infer_zone(left, middle, right, mid_up)
+                zone, conf, inferred = _infer_zone(left, middle, right, mid_up)
 
-        self._zone       = zone
-        self._confidence = conf
-        self._inferred   = inferred
+            # Write result back under lock (fast — just three assignments)
+            with self._lock:
+                self._zone       = zone
+                self._confidence = conf
+                self._inferred   = inferred
 
     def _serial_reader(self, name: str, port: str) -> None:
         try:

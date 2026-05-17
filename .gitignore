@@ -12,3 +12,21 @@ venv/
 # IDE
 .vscode/
 .idea/
+
+# Secrets & session
+.env
+data/*
+!data/profiles/
+!data/profiles/*.json
+!data/csi_windows.npz
+
+# ML
+models/
+.venv-train/
+ml/cluster/logs/
+
+# HUD
+hud/node_modules/
+hud/dist/
+_hud_design/
+*.wav

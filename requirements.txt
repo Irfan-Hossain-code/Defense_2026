@@ -1,0 +1,21 @@
+requests>=2.31.0
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+numpy>=1.24.0
+python-dotenv>=1.0.0
+openai>=1.40.0
+websockets>=12.0
+httpx>=0.27.0
+google-genai>=1.0.0
+sounddevice>=0.4.6
+SpeechRecognition>=3.10.0
+# PyAudio not needed — PTT uses sounddevice + WAV file for STT
+
+# Optional: face recognition overlay (Python 3.14 needs setuptools<76 for pkg_resources)
+# face_recognition>=1.3.0
+# face-recognition-models>=0.3.0
+# setuptools>=75,<76
+
+# Optional: LiveKit audio publish (install if LIVEKIT_URL is set)
+# livekit>=0.17.0
+# livekit-api>=0.6.0
