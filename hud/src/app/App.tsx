@@ -24,9 +24,9 @@ export default function App() {
 
       <motion.div className="absolute inset-0 z-10 pointer-events-none">
         <div
-          className={`absolute top-3 left-1/2 -translate-x-1/2 text-[9px] tracking-[0.25em] z-20 px-2 py-0.5 rounded-sm backdrop-blur-sm border ${
+          className={`absolute top-4 left-1/2 -translate-x-1/2 text-sm tracking-[0.25em] z-20 px-4 py-1 rounded-md backdrop-blur-sm border font-medium ${
             connected
-              ? 'text-white/80 bg-zinc-900/25 border-white/15'
+              ? 'text-white/90 bg-zinc-900/30 border-white/20'
               : 'text-white/50 bg-zinc-900/25 border-white/10'
           }`}
         >

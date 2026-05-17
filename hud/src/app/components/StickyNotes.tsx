@@ -9,20 +9,26 @@ interface StickyNotesProps {
   notes: Note[];
 }
 
+const priorityBorder = {
+  high:   'border-red-400/50',
+  medium: 'border-yellow-400/40',
+  low:    'border-white/15',
+};
+
 export function StickyNotes({ notes }: StickyNotesProps) {
   return (
-    <div className="absolute top-4 right-4 z-10 pointer-events-auto">
+    <div className="absolute top-5 right-5 z-10 pointer-events-auto space-y-2">
       {notes.map((note) => (
         <div
           key={note.id}
-          className="backdrop-blur-sm bg-zinc-900/30 border border-white/12 rounded px-2.5 py-2 min-w-[250px] max-w-[280px]"
+          className={`backdrop-blur-sm bg-zinc-900/40 border rounded-lg px-4 py-3 min-w-[320px] max-w-[400px] shadow-lg ${priorityBorder[note.priority]}`}
         >
-          <div className="text-[10px] tracking-[0.18em] text-white/80 font-medium mb-1 uppercase">
+          <div className="text-sm tracking-[0.15em] text-white/90 font-semibold mb-2 uppercase">
             {note.title}
           </div>
-          <ul className="space-y-0.5">
+          <ul className="space-y-1">
             {note.details.map((detail, index) => (
-              <li key={index} className="text-[10px] text-white/75 leading-tight">
+              <li key={index} className="text-sm text-white/80 leading-snug">
                 {detail}
               </li>
             ))}

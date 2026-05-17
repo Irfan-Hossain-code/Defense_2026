@@ -90,11 +90,10 @@ def _open_camera() -> cv2.VideoCapture | None:
         if not cap.isOpened():
             cap.release()
             continue
-        ret, _ = cap.read()
-        if ret:
-            print(f"[camera] index {idx}")
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        ret, frame = cap.read()
+        if ret and frame is not None and frame.size > 0:
+            h, w = frame.shape[:2]
+            print(f"[camera] index {idx}  {w}x{h}")
             return cap
         cap.release()
     print("ERROR: No camera found.")
@@ -147,8 +146,8 @@ def main() -> None:
     parser.add_argument("--middle-host", default=None, metavar="IP",
                         help="Mac hotspot IP for MIDDLE node via bridge_middle.py.")
     parser.add_argument("--model", default="rf",
-                        choices=["rf", "knn", "aalto", "irfanin"],
-                        help="Zone classifier: rf (default) | knn | aalto | irfanin (CNN-GRU)")
+                        choices=["rf", "knn", "aalto", "cnn", "irfanin", "first_branch"],
+                        help="Zone classifier: rf (default) | knn | aalto | cnn | irfanin | first_branch")
     args = parser.parse_args()
 
     # ── RF calibration shortcut ───────────────────────────────────────────────
@@ -201,9 +200,8 @@ def main() -> None:
     try:
         while True:
             ret, frame = cap.read()
-            if not ret:
-                print("WARNING: Frame read failed.")
-                break
+            if not ret or frame is None or frame.size == 0:
+                continue   # skip bad frames silently, don't crash
 
             frame_h, frame_w = frame.shape[:2]
             frame_rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

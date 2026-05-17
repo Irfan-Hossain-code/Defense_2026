@@ -9,18 +9,24 @@ interface TeamRequestsProps {
   requests: TeamRequest[];
 }
 
+const priorityColor = {
+  high:   'text-red-400',
+  medium: 'text-yellow-400',
+  low:    'text-white/70',
+};
+
 export function TeamRequests({ requests }: TeamRequestsProps) {
   return (
-    <div className="absolute bottom-3 left-3 z-10 space-y-1 pointer-events-auto">
+    <div className="absolute bottom-5 left-5 z-10 space-y-2 pointer-events-auto">
       {requests.map((request) => (
         <div
           key={request.id}
-          className="backdrop-blur-sm bg-zinc-900/30 border border-white/12 rounded px-2 py-1 max-w-[200px]"
+          className="backdrop-blur-sm bg-zinc-900/40 border border-white/15 rounded-lg px-4 py-2.5 max-w-[320px] shadow-md"
         >
-          <p className="text-[9px] tracking-wider text-white/80 font-medium leading-none mb-0.5">
+          <p className={`text-sm tracking-wider font-semibold leading-none mb-1.5 ${priorityColor[request.priority]}`}>
             {request.team}
           </p>
-          <p className="text-[9px] text-white/65 leading-tight">{request.message}</p>
+          <p className="text-sm text-white/75 leading-snug">{request.message}</p>
         </div>
       ))}
     </div>

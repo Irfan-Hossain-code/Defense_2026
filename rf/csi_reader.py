@@ -45,25 +45,54 @@ CAL_PACKETS = 60     # packets per node during calibration
 WINDOW_SIZE = 8      # rolling window for temporal variance
 SENSITIVITY = 2.5    # variance ratio above baseline = motion detected
 
-MODEL_FILES = {
-    "rf":    os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "rf_zone_model.pkl")),
-    "knn":   os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "rf_zone_model_knn.pkl")),
-    "aalto": os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "rf_zone_model_aalto.pkl")),
-}
-NODES_REQUIRED = {"left": True, "middle": False, "right": True}
+_base = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 
-INFERENCE_HZ = 20   # how often the inference thread runs (independent of serial rate)
+MODEL_FILES = {
+    "rf":           os.path.join(_base, "rf_zone_model.pkl"),
+    "knn":          os.path.join(_base, "rf_zone_model_knn.pkl"),
+    "aalto":        os.path.join(_base, "rf_zone_model_aalto.pkl"),
+    "first_branch": os.path.join(_base, "rf_zone_model_first_branch.pkl"),
+    "cnn":          os.path.join(_base, "models", "csi_cnn",     "best.keras"),
+    "irfanin":      os.path.join(_base, "models", "irfanin_cnn", "best.keras"),
+}
+# Keras models need tf.keras.models.load_model instead of joblib
+KERAS_MODELS   = {"cnn", "irfanin"}
+NODES_REQUIRED = {"left": True, "middle": False, "right": True}
+INFERENCE_HZ   = 20
+
+
+def _load_keras_norm(model_name: str) -> tuple[float, float]:
+    """Load normalisation stats for Keras models."""
+    candidates = [
+        os.path.join(_base, "models", f"{model_name}_cnn", "norm_stats.npz"),
+        os.path.join(_base, "models", "csi_cnn", "norm_stats.npz"),
+        os.path.join(_base, "data", "csi_windows.npz"),
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            try:
+                import numpy as np
+                d = np.load(p, allow_pickle=True)
+                return float(d["mean"]), float(d["std"])
+            except Exception:
+                continue
+    return 0.0, 1.0
 
 
 def _load_model(model_name: str = "rf"):
-    """Load a trained zone classifier. model_name: 'rf' or 'knn'."""
+    """Load a trained zone classifier."""
     path = MODEL_FILES.get(model_name, MODEL_FILES["rf"])
     if not os.path.isfile(path):
         return None
     try:
-        import joblib
-        model = joblib.load(path)
-        print(f"[RF] {model_name.upper()} model loaded from {os.path.basename(path)}")
+        if model_name in KERAS_MODELS:
+            import tensorflow as tf
+            model = tf.keras.models.load_model(path)
+            print(f"[RF] Keras model '{model_name}' loaded from {os.path.basename(path)}")
+        else:
+            import joblib
+            model = joblib.load(path)
+            print(f"[RF] {model_name.upper()} model loaded from {os.path.basename(path)}")
         return model
     except Exception as exc:
         print(f"[RF] Could not load {model_name} model ({exc}) — using threshold fallback.")
@@ -230,11 +259,16 @@ class CsiReader:
             "right":  _fresh(),
         }
 
-        self._zone       = "NO_MOTION"
-        self._confidence = 0.0
-        self._inferred   = False
-        self._model      = _load_model(model_name)
-        self._model_name = model_name
+        self._zone        = "NO_MOTION"
+        self._confidence  = 0.0
+        self._inferred    = False
+        self._model       = _load_model(model_name)
+        self._model_name  = model_name
+        if model_name in KERAS_MODELS:
+            self._keras_mean, self._keras_std = _load_keras_norm(model_name)
+            print(f"[RF] Norm: mean={self._keras_mean:.4f} std={self._keras_std:.4f}")
+        else:
+            self._keras_mean, self._keras_std = 0.0, 1.0
 
     # ── Calibration ───────────────────────────────────────────────────────────
 
@@ -419,28 +453,53 @@ class CsiReader:
 
             # Run inference OUTSIDE the lock
             if self._model is not None:
-                max_r = max(left, middle, right)
-                if max_r < 1.1:
-                    zone, conf, inferred = "NO_MOTION", 0.9, False
-                else:
-                    try:
-                        # aalto model needs raw amplitude features from window buffers;
-                        # rf/knn models use the 3 aggregated ratio values.
-                        if self._model_name == "aalto":
-                            with self._lock:
-                                lw = list(self._nodes["left"]["window"])
-                                rw = list(self._nodes["right"]["window"])
-                            features = _build_aalto_features(lw, rw)
-                        else:
-                            features = _build_features(left, middle, right)
 
-                        proba    = self._model.predict_proba([features])[0]
-                        best     = int(proba.argmax())
-                        zone     = self._model.classes_[best]
-                        conf     = round(float(proba[best]), 2)
-                        inferred = not mid_up
+                if self._model_name in KERAS_MODELS:
+                    # ── Keras path (cnn / irfanin) ────────────────────────────
+                    with self._lock:
+                        lw     = list(self._nodes["left"]["window"])
+                        rw     = list(self._nodes["right"]["window"])
+                        mid_up = self._nodes["middle"]["connected"]
+                    try:
+                        import numpy as _np
+                        from ml.csi.windows import pad_amplitudes, T as _T, S as _S
+                        if len(lw) < _T or len(rw) < _T:
+                            zone, conf, inferred = "NO_MOTION", 0.9, False
+                        else:
+                            L = _np.array([pad_amplitudes(a, _S) for a in lw[-_T:]])
+                            R = _np.array([pad_amplitudes(a, _S) for a in rw[-_T:]])
+                            win = _np.stack([L, R], axis=-1)          # (T, S, 2)
+                            X   = win.reshape(1, _T, _S * 2).astype(_np.float32)
+                            X   = (X - self._keras_mean) / self._keras_std
+                            proba    = self._model.predict(X, verbose=0)[0]
+                            best     = int(proba.argmax())
+                            zone     = ["LEFT", "MIDDLE", "RIGHT"][best]
+                            conf     = round(float(proba[best]), 2)
+                            inferred = not mid_up
                     except Exception:
-                        zone, conf, inferred = _infer_zone(left, middle, right, mid_up)
+                        zone, conf, inferred = "NO_MOTION", 0.0, False
+
+                else:
+                    # ── sklearn path (rf / knn / aalto) ──────────────────────
+                    max_r = max(left, middle, right)
+                    if max_r < 1.1:
+                        zone, conf, inferred = "NO_MOTION", 0.9, False
+                    else:
+                        try:
+                            if self._model_name == "aalto":
+                                with self._lock:
+                                    lw = list(self._nodes["left"]["window"])
+                                    rw = list(self._nodes["right"]["window"])
+                                features = _build_aalto_features(lw, rw)
+                            else:
+                                features = _build_features(left, middle, right)
+                            proba    = self._model.predict_proba([features])[0]
+                            best     = int(proba.argmax())
+                            zone     = self._model.classes_[best]
+                            conf     = round(float(proba[best]), 2)
+                            inferred = not mid_up
+                        except Exception:
+                            zone, conf, inferred = _infer_zone(left, middle, right, mid_up)
             else:
                 zone, conf, inferred = _infer_zone(left, middle, right, mid_up)
 
