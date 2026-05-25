@@ -1,82 +1,38 @@
-# Defence Hackathon 2026 — Camera Tracking Subsystem
+# Defence Hackathon 2026 — Tactical Tracking System
 
 Real-time human tracking via laptop webcam using OpenCV and MediaPipe Pose.
 When the person is visible, a live stick figure is drawn. When they leave the
 frame, the system switches to **RF FALLBACK / GHOST MODE** and shows a fading
 ghost at the last known position, drifting with the last known movement vector.
-The RF slot is a clean placeholder ready to receive coarse position estimates
-from ESP32 nodes.
 
-An optional **facial recognition overlay** identifies known individuals and
-draws their name in gold on screen. It runs in a background thread and never
-affects tracking performance.
+Optional layers add facial recognition, a tactical React HUD, AI narration,
+and ESP32 Wi-Fi sensing. **None of these are required to run the core tracker.**
 
-## Quick start
+---
 
-```
-pip install opencv-python mediapipe numpy
+## Quickstart — no hardware needed
+
+```bash
+git clone <repo>
+cd defence_2026
+
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
+
+pip install -r requirements.txt
 python main.py
 ```
 
-### Tactical AI + React HUD (Jarvis layer)
-
-See **[TACTICAL_SETUP.md](TACTICAL_SETUP.md)** for WebSocket HUD, ElevenLabs voice, PTT, and `.env` keys.
-
-```
-pip install -r requirements.txt
-cp .env.example .env
-python main.py          # terminal 1
-cd hud && npm run dev   # terminal 2 → http://localhost:5173
-```
-
 First run downloads `pose_landmarker_lite.task` (~5 MB) automatically.
-Press **ESC** in the camera window to quit.
+A webcam window opens. Press **ESC** to quit.
 
-### Facial recognition (optional)
-
-```
-pip install face_recognition
-```
-
-Add photos of each person under `known_faces/<name>/`:
-
-```
-known_faces/
-  irfan/
-    photo1.jpg
-    photo2.jpg
-```
-
-The system loads these on startup and identifies faces automatically. If
-`face_recognition` is not installed or the folder is empty, the overlay is
-silently disabled and everything else works normally.
-
----
-
-## File map
-
-| File | What it does | Key inputs | Key outputs |
-|------|-------------|------------|-------------|
-| `main.py` | Entry point — opens the webcam, runs the frame loop, calls tracker and display functions | Webcam feed (index 0) | OpenCV window, terminal status |
-| `model_setup.py` | Downloads the MediaPipe pose model on first run and saves it locally | Internet (first run only) | `pose_landmarker_lite.task` on disk |
-| `tracker/constants.py` | All tuning numbers: visibility threshold, ghost fade rate, drift duration, skeleton edge list | — | Imported by tracker and display modules |
-| `tracker/state.py` | `PersonState` dataclass — a snapshot of everything known about the person in one frame | — | Used as the return type of `PersonTracker.update()` |
-| `tracker/tracker.py` | `PersonTracker` — wraps MediaPipe, scores confidence, switches TRACKING / GHOST modes, accumulates ghost drift | RGB frame per call; optional RF dx/dy via `update_rf_estimate()` | `PersonState` or `None`; ghost alpha and offset readable as properties |
-| `display/skeleton.py` | `draw_skeleton()` and `draw_bbox()` — draw the stick figure and bounding box onto a frame | BGR frame + `PersonState`; optional color, alpha, pixel offset | Frame modified in-place |
-| `display/hud.py` | `draw_hud()` — renders the mode label, live metrics, and ESC hint as an overlay | BGR frame + `PersonTracker` + current `PersonState` | Frame modified in-place |
-| `display/identity_overlay.py` | `draw_identity_overlay()` — draws a gold face box and name label for a recognised person | BGR frame + `FaceState` (or `None`) | Frame modified in-place; no-op if `None` |
-| `identity/face_state.py` | `FaceState` dataclass — name, confidence, and face bounding box for one recognised face | — | Returned by `FaceIdentifier.update()` |
-| `identity/database.py` | `FaceDatabase` — loads face encodings from `known_faces/` at startup | `known_faces/<name>/*.jpg` | List of encodings + names used by `FaceIdentifier` |
-| `identity/face_identifier.py` | `FaceIdentifier` — runs HOG face detection and dlib recognition in a background thread | RGB frame per call | `FaceState` or `None`; never blocks the main loop |
-
----
-
-## RF integration (future)
-
-`PersonTracker.update_rf_estimate(dx, dy)` is the hook for the ESP32 module.
-Call it once per frame with a coarse pixel-space movement estimate and the ghost
-figure will drift accordingly. See the comment block in `main.py` for the exact
-location to wire it in.
+> **No webcam?** The system will print `ERROR: No camera found.` and exit.
+> Try `$env:CAMERA_INDEX=1` (Windows) or `CAMERA_INDEX=1 python main.py` (macOS/Linux)
+> to try a different camera index.
 
 ---
 
@@ -84,51 +40,90 @@ location to wire it in.
 
 | Mode | Trigger | Visual |
 |------|---------|--------|
-| **CAMERA TRACKING** | Pose detected with sufficient confidence | Green skeleton + bounding box; live metrics in corner |
+| **CAMERA TRACKING** | Pose detected with sufficient confidence | Green skeleton + bounding box, live metrics |
 | **RF FALLBACK / GHOST MODE** | 12+ consecutive frames with no confident pose | Orange fading skeleton at last known position, drifting with last velocity |
 
----
-
-## Facial recognition performance
-
-Recognition runs in a **background thread** in parallel with the main tracking
-loop, so it never causes frame drops. The main loop always returns the cached
-result instantly.
-
-The only performance knob is `_RECOGNITION_INTERVAL` in
-`identity/face_identifier.py`. It controls how often a new recognition pass is
-launched:
-
-| Interval | Behaviour |
-|----------|-----------|
-| `0.5` | Twice per second — more responsive label updates |
-| `1.0` | Once per second — default, smooth with no perceptible dips |
-| `2.0` | Every two seconds — maximum CPU headroom |
-
-Increase the interval if the system feels sluggish; decrease it if you want the
-name label to react faster to face changes. The tracking system is unaffected
-either way.
+Without ESP32 nodes the RF zone column stays blank — everything else works normally.
 
 ---
 
-## ESP32 RF / CSI Setup — 3-Node Zone Localizer
+## Optional layer 1 — Facial recognition
 
-Three ESP32-WROOM boards act as Wi-Fi sensing nodes arranged LEFT / MIDDLE / RIGHT
-along a wall. They detect motion behind the wall and estimate which zone the person
-is in. The MIDDLE node can be on a second laptop (Mac) over the shared hotspot.
+```bash
+pip install face_recognition
+```
 
-### Hardware
+Add photos under `known_faces/<name>/`:
 
-| Node | Board | Connected to | Port |
-|------|-------|-------------|------|
-| LEFT | ESP32-WROOM | Windows laptop USB | COM10 |
-| RIGHT | ESP32-WROOM | Windows laptop USB | COM8 |
-| MIDDLE | ESP32-WROOM | Mac USB | `/dev/cu.usbserial-1130` |
+```
+known_faces/
+  irfan/
+    photo1.jpg
+```
 
-All three boards connect to the **same Wi-Fi hotspot** (OnePlus 8, `Oneplus8`).
-The hotspot phone stays stationary at all times.
+The system loads encodings on startup and identifies faces in a background thread.
+If `face_recognition` is not installed or the folder is empty, the overlay is
+silently disabled and nothing else changes.
 
-Physical layout (same side of wall as the ESPs):
+---
+
+## Optional layer 2 — Tactical HUD + AI narration
+
+The HUD is a React overlay that shows zones, subtitles, and event feeds over
+WebSocket. The AI layer uses ConfidentialMind and Gemini for narration and
+push-to-talk Q&A.
+
+**Step 1 — copy and fill `.env`**
+
+```bash
+cp .env.example .env
+# Edit .env — see key table below
+```
+
+| Variable | Required for | Where to get |
+|----------|-------------|--------------|
+| `CONFIDENTIALMIND_BASE_URL` | Event narration + vision profile | Junction / ConfidentialMind handout |
+| `CONFIDENTIALMIND_API_KEY` | Same | Same |
+| `CM_MODEL_NARRATION` | e.g. `Gemma 4` | `list_models.py` in CM repo |
+| `CM_MODEL_VISION` | e.g. `Qwen3-Omni-...` | Same |
+| `GOOGLE_API_KEY` | Voice Q&A (Gemini Flash) | GCP API key |
+| `GEMINI_MODEL` | Default `gemini-2.0-flash` | — |
+
+**Without any keys:** the tracker still runs, HUD still updates, fallback text
+prints to terminal, and TTS is silently skipped.
+
+**Step 2 — start the tracker**
+
+```bash
+python main.py
+```
+
+**Step 3 — start the HUD (second terminal)**
+
+```bash
+cd hud
+npm install   # first time only
+npm run dev
+```
+
+Open **http://localhost:5173** and drag it over the OpenCV window.
+
+### Controls
+
+| Key | Action |
+|-----|--------|
+| **ESC** | Quit |
+| **T** | Push-to-talk: press once to record, again to send |
+
+---
+
+## Optional layer 3 — ESP32 RF zone sensing
+
+Three ESP32-WROOM boards (LEFT / MIDDLE / RIGHT) detect motion behind a wall
+and feed a coarse zone estimate into the ghost tracker via
+`PersonTracker.update_rf_estimate(dx, dy)`.
+
+### Hardware layout
 
 ```
 [wall — person moves on the other side]
@@ -139,11 +134,19 @@ Physical layout (same side of wall as the ESPs):
                 Wi-Fi hotspot (phone)
 ```
 
+| Node | Board | Connected to | Port |
+|------|-------|-------------|------|
+| LEFT | ESP32-WROOM | Windows laptop USB | COM10 |
+| RIGHT | ESP32-WROOM | Windows laptop USB | COM8 |
+| MIDDLE | ESP32-WROOM | Mac USB | `/dev/cu.usbserial-1130` |
+
+All three boards connect to the **same Wi-Fi hotspot** (phone stays stationary).
+
 ---
 
-### WINDOWS LAPTOP — copy-paste these in order
+### Windows laptop — run these in order
 
-**Step 1 — activate the environment (do this once per terminal session)**
+**Step 1 — activate the environment**
 ```powershell
 .venv\Scripts\Activate.ps1
 ```
@@ -152,29 +155,24 @@ Physical layout (same side of wall as the ESPs):
 ```powershell
 python combining_three_esps\run_wroom.py left
 ```
-> If it hangs at `Connecting......` — hold the **BOOT** button on the ESP32 while dots appear, then release.
+> Hangs at `Connecting......`? Hold the **BOOT** button while dots appear, then release.
 
 **Step 3 — flash RIGHT board (COM8)**
 ```powershell
 python combining_three_esps\run_wroom.py right
 ```
-> Same tip: hold BOOT if it hangs.
 
-**Step 4 — wait for the Mac to start the bridge (see Mac instructions below), then run the localizer**
+**Step 4 — run the localizer** (wait for Mac bridge first if using MIDDLE node)
 ```powershell
 python combining_three_esps\run_all_three.py --middle-host MAC_IP_HERE
 ```
-Replace `MAC_IP_HERE` with the IP the Mac prints when it starts the bridge (e.g. `10.75.241.42`).
 
-> **No Mac / MIDDLE node?** Run without it — zone inference still works using LEFT + RIGHT symmetry:
+> **No Mac / MIDDLE node?** Omit `--middle-host` — zone inference still works with LEFT + RIGHT:
 > ```powershell
 > python combining_three_esps\run_all_three.py
 > ```
 
-**Step 5 — calibrate**
-
-When the localizer starts, keep the sensing area (behind the wall) completely empty.
-Wait for all connected nodes to show `CAL✓`. Then walk behind the wall.
+**Step 5 — calibrate** (keep the sensing area empty, wait for all nodes to show `CAL✓`)
 
 **Step 6 — skip recalibration on future runs**
 ```powershell
@@ -183,40 +181,19 @@ python combining_three_esps\run_all_three.py --middle-host MAC_IP_HERE --load-ca
 
 ---
 
-### MAC (friend's laptop) — copy-paste these in order
+### Mac (MIDDLE node) — run these in order
 
-**Step 1 — open a terminal in the project folder**
-```bash
-cd /path/to/defence_2026
-```
-
-**Step 2 — install tools (once only)**
 ```bash
 pip3 install platformio pyserial
-```
 
-**Step 3 — flash the MIDDLE board**
-```bash
 cd combining_three_esps/firmware/wroom
 pio run -e MIDDLE --target upload
 cd ../../..
-```
-> If it hangs at `Connecting......` — hold the **BOOT** button on the ESP32 while dots appear, then release.
-> If upload fails, check the port: `python3 -c "import serial.tools.list_ports; [print(p.device, p.description) for p in serial.tools.list_ports.comports()]"`
 
-**Step 4 — start the bridge**
-```bash
 python3 combining_three_esps/bridge_middle.py
 ```
 
-It will print something like:
-```
-This Mac's hotspot IP appears to be: 10.75.241.42
-On the Windows laptop run:
-  python combining_three_esps/run_all_three.py --middle-host 10.75.241.42
-```
-
-Give that IP to the Windows operator. Keep this terminal open — closing it stops the bridge.
+The bridge prints its IP. Pass that IP to the Windows operator as `--middle-host`.
 
 ---
 
@@ -230,7 +207,7 @@ Give that IP to the Windows operator. Keep this terminal open — closing it sto
   LEFT    [████████░░░░░░░░░░░░░░░░░░░░]   4.2x  -42dBm  pkts= 312  CAL✓
   MIDDLE  [████░░░░░░░░░░░░░░░░░░░░░░░░]   2.1x  -38dBm  pkts= 308  CAL✓
   RIGHT   [██░░░░░░░░░░░░░░░░░░░░░░░░░░]   0.9x  -44dBm  pkts= 310  CAL✓
-  ────────────────────────────────────────────────────────────────────────
+  ───────────────────────────────────────────────────────────────────────
   Zone: LEFT_MIDDLE    Conf: 0.68   Dist: mid       ◀◀
 ```
 
@@ -238,16 +215,44 @@ Zones: `LEFT` `LEFT_MIDDLE` `MIDDLE` `RIGHT_MIDDLE` `RIGHT` `NO_MOTION`
 
 CSV logs are saved automatically to `combining_three_esps/data/`.
 
+### RF model options
+
+```bash
+python main.py                       # RandomForest (default)
+python main.py --model irfanin       # CNN-GRU
+python main.py --model aalto         # GradientBoosting
+python main.py --cal                 # calibration only, then exit
+```
+
 ---
 
-### Troubleshooting
+## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
+| `ERROR: No camera found.` | Try `CAMERA_INDEX=1 python main.py` |
 | Flash hangs at `Connecting......` | Hold BOOT button on ESP32 while dots appear |
 | `No ports found` | Check USB cable (must be data cable, not charge-only) |
-| `csi_packets=0` after connecting | Normal — packets appear once traffic is generated. Wait 10s. |
+| `csi_packets=0` after connecting | Normal — wait ~10 s for traffic to appear |
 | MIDDLE shows `not connected` | Bridge not running on Mac, or wrong `--middle-host` IP |
 | Score stays at 0 forever | Wi-Fi credentials wrong — check `WIFI_SSID`/`WIFI_PASS` in `platformio.ini` |
-| Too many false positives | Increase sensitivity: `--sensitivity 3.5` |
-| Not detecting motion | Decrease sensitivity: `--sensitivity 1.8` |
+| Too many false positives | `--sensitivity 3.5` |
+| Not detecting motion | `--sensitivity 1.8` |
+| `[tactical] disabled` in terminal | AI imports missing — check `pip install -r requirements.txt` and `.env` |
+
+---
+
+## File map
+
+| File / folder | What it does |
+|---------------|-------------|
+| `main.py` | Entry point — webcam loop, calls tracker, display, RF, and tactical layers |
+| `model_setup.py` | Downloads the MediaPipe pose model on first run |
+| `tracker/` | `PersonTracker` — pose detection, TRACKING / GHOST mode switching, RF drift |
+| `display/` | `draw_skeleton`, `draw_bbox`, `draw_hud`, `draw_identity_overlay` |
+| `identity/` | Background face recognition thread (`face_recognition` optional) |
+| `rf/csi_reader.py` | ESP32 CSI serial reader + zone ML model — silently disabled if no ESPs |
+| `combining_three_esps/` | Firmware flash scripts and 3-node zone localizer |
+| `ai/` | Event detector, ConfidentialMind narrator, Gemini PTT |
+| `bridge/` | WebSocket server feeding the React HUD |
+| `hud/` | React tactical overlay (Vite, runs on port 5173) |
